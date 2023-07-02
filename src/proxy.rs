@@ -19,7 +19,7 @@ impl Client {
     pub fn new() -> Client {
         Client {
             host: String::from("127.0.0.1"),
-            port: 1337,
+            port: 38101,
             connection_state: ConnectionState::Disconnected,
         }
     }

@@ -7,11 +7,11 @@ use std::{
 mod proxy;
 
 fn main() {
-    let host = "habbo.com";
+    let host = "game-us.habbo.com";
     check_if_root();
-    check_hosts_file(host)
-    // let mut proxy_client = proxy::Client::new();
-    // proxy_client.listen();
+    check_hosts_file(host);
+    let mut proxy_client = proxy::Client::new();
+    proxy_client.listen();
 }
 
 fn check_if_root() {
@@ -26,7 +26,7 @@ fn check_hosts_file(host: &str) {
         .read(true)
         .append(true)
         .write(true)
-        .open("/etc/hostsbackup")
+        .open("/etc/hosts")
         .expect("Failed to open hosts file");
     let mut contents = String::new();
     hosts_file
@@ -37,7 +37,6 @@ fn check_hosts_file(host: &str) {
     println!("Checking for proxy entry... ");
     if contents.lines().any(|line| line.contains(host)) {
         println!("Found proxy entry for {}.", host);
-        remove_proxy_entry(host, hosts_file, contents);
     } else {
         println!("Not found.");
         add_proxy_entry(host, hosts_file);
