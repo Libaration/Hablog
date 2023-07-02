@@ -30,38 +30,34 @@ impl Client {
 
         println!("Listening on {}:{}", self.host, self.port);
 
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    println!("New connection: {}", stream.peer_addr().unwrap());
-                    self.connection_state = ConnectionState::Connected;
-                    thread::spawn(move || {
-                        handle_client(stream);
-                    });
-                }
-                Err(e) => {
-                    println!("Error: {}", e);
-                }
-            }
-        }
-        fn handle_client(mut stream: TcpStream) {
-            let mut buffer = [0; 1024];
-            loop {
-                match stream.read(&mut buffer) {
-                    Ok(n) => {
-                        if n == 0 {
+        match listener.accept() {
+            Ok((mut stream, addr)) => {
+                println!("New connection: {}", addr);
+                self.connection_state = ConnectionState::Connected;
+                let mut buffer = [0; 1024];
+                loop {
+                    match stream.read(&mut buffer) {
+                        Ok(n) => {
+                            if n == 0 {
+                                println!("Connection closed by remote end");
+                                self.connection_state = ConnectionState::Disconnected;
+                                break;
+                            }
+                            let message = String::from_utf8_lossy(&buffer[..n]);
+                            println!("Received message: {}", message);
+                        }
+                        Err(e) => {
+                            println!("Error reading from socket: {}", e);
                             break;
                         }
-                        let message = String::from_utf8_lossy(&buffer[..n]);
-                        println!("Received message: {}", message);
-                    }
-                    Err(e) => {
-                        println!("Error reading from socket: {}", e);
-                        break;
                     }
                 }
             }
+            Err(e) => {
+                println!("Error: {}", e);
+            }
         }
+        self.connection_state = ConnectionState::Disconnected;
     }
 }
 
