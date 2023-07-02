@@ -8,9 +8,17 @@ mod proxy;
 
 fn main() {
     let host = "habbo.com";
+    check_if_root();
     check_hosts_file(host)
     // let mut proxy_client = proxy::Client::new();
     // proxy_client.listen();
+}
+
+fn check_if_root() {
+    if unsafe { libc::getuid() } != 0 {
+        println!("You must run this program as root.");
+        std::process::exit(1);
+    }
 }
 
 fn check_hosts_file(host: &str) {
