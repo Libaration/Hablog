@@ -1,17 +1,26 @@
 use std::{
     fs::File,
     fs::OpenOptions,
-    io::{Read, Seek, Write},
+    io::{Read, Write},
 };
 
-mod proxy;
+mod connection;
+use connection::Connection;
 
-fn main() {
-    let host = "game-us.habbo.com";
+#[tokio::main]
+async fn main() {
     check_if_root();
-    check_hosts_file(host);
-    let mut proxy_client = proxy::Client::new();
-    proxy_client.listen();
+    let host = String::from("game-us.habbo.com");
+    //check_hosts_file(&host);
+    let port = 38101;
+    let mut connection = Connection {
+        from_ip: None,
+        port,
+        host,
+        connection_state: connection::ConnectionState::Disconnected,
+    };
+    connection.resolve_host().expect("Could not resolve host");
+    connection.start().await
 }
 
 fn check_if_root() {
