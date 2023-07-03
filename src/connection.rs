@@ -108,7 +108,7 @@ impl Connection {
                 match server_reader.read(&mut server_buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        println!("SERVER -> CLIENT, {} bytes sent", n);
+                        println!("CLIENT -> SERVER, {} bytes sent", n);
                         println!("{}", String::from_utf8_lossy(&server_buf[..n]));
                         client_writer
                             .write_all(&server_buf[..n])
@@ -128,7 +128,7 @@ impl Connection {
                 match client_reader.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        println!("CLIENT -> SERVER, {} bytes sent", n);
+                        println!("SERVER -> CLIENT, {} bytes sent", n);
 
                         server_writer
                             .write_all(&buf[..n])
