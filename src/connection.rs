@@ -63,8 +63,6 @@ impl Connection {
                     match listener.accept().await {
                         Ok((socket, _)) => {
                             println!("New connection from {}", socket.peer_addr().unwrap());
-                            println!("Connection state: {:?}", self.connection_state);
-                            println!("Connected on port {}", self.port);
                             self.handle_incoming_connection(socket).await;
                         }
                         Err(e) => {
@@ -81,67 +79,73 @@ impl Connection {
         }
     }
 
-    async fn handle_incoming_connection(&mut self, socket: TcpStream) {
-        // Connect to the real server
-        println!("Connecting to the real server");
-        match TcpStream::connect(("54.165.147.223", self.port)).await {
-            Ok(remote_stream) => {
-                println!("Connected to the real server");
-                self.connection_state = ConnectionState::Connected;
-                self.forward_data(socket, remote_stream).await;
-            }
-            Err(e) => {
-                eprintln!("Failed to connect to the real server: {}", e);
-                self.connection_state = ConnectionState::Disconnected;
-            }
-        }
-    }
+    async fn handle_incoming_connection(&mut self, mut socket: TcpStream) {
+        println!("Connecting to server...");
+        let mut connector = TcpStream::connect(("54.165.147.223", 38101))
+            .await
+            .expect("could not connect to server");
+        // match connector {
+        //     Ok(mut stream) => {
+        //         println!("Connected to server");
+        //         self.connection_state = ConnectionState::Connected;
+        //     }
+        //     Err(e) => {
+        //         eprintln!("Failed to connect to server: {}", e);
+        //         self.connection_state = ConnectionState::Disconnected;
+        //         return;
+        //     }
+        // }
 
-    async fn forward_data(&mut self, mut client: TcpStream, mut server: TcpStream) {
-        let mut client_buffer = vec![0; 32768];
-        let mut server_buffer = vec![0; 32768];
+        let (mut server_reader, mut server_writer) = connector.into_split();
 
-        let (mut client_reader, mut client_writer) = client.split();
-        let (mut server_reader, mut server_writer) = server.split();
+        let (mut client_reader, mut client_writer) = socket.into_split();
 
-        loop {
-            tokio::select! {
-                res = client_reader.read(&mut client_buffer) => {
-                    match res {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            println!("CLIENT -> SERVER, {} bytes sent", n);
-                            if let Err(e) = server_writer.write_all(&client_buffer[..n]).await {
-                                eprintln!("Error forwarding data from client to server: {}", e);
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Error reading from client: {}", e);
-                            break;
-                        }
+        let mut buf = vec![0; 58];
+        let mut server_buf = vec![0; 58];
+
+        let s_spawn = tokio::spawn(async move {
+            loop {
+                match server_reader.read(&mut server_buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        println!("SERVER -> CLIENT, {} bytes sent", n);
+                        println!("{}", String::from_utf8_lossy(&server_buf[..n]));
+                        client_writer
+                            .write_all(&server_buf[..n])
+                            .await
+                            .expect("Failed to write to client");
                     }
-                }
-                res = server_reader.read(&mut server_buffer) => {
-                    match res {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            println!("SERVER -> CLIENT, {} bytes sent", n);
-                            if let Err(e) = client_writer.write_all(&server_buffer[..n]).await {
-                                eprintln!("Error forwarding data from server to client: {}", e);
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Error reading from server: {}", e);
-                            break;
-                        }
+                    Err(e) => {
+                        println!("Server disconnect");
+                        eprintln!("Error reading from server: {}", e);
+                        break;
                     }
                 }
             }
-        }
+        });
+        let c_spawn = tokio::spawn(async move {
+            loop {
+                match client_reader.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        println!("CLIENT -> SERVER, {} bytes sent", n);
 
-        self.connection_state = ConnectionState::Disconnected;
-        println!("Connection closed");
+                        server_writer
+                            .write_all(&buf[..n])
+                            .await
+                            .expect("Failed to write to server");
+
+                        println!("{}", String::from_utf8_lossy(&buf[..n]));
+                    }
+                    Err(e) => {
+                        println!("Client disconnect");
+                        eprintln!("Error reading from client: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        tokio::try_join!(s_spawn, c_spawn).expect("Failed to join tasks");
     }
 }
