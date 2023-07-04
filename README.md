@@ -6,16 +6,16 @@ This was kinda just an excuse to learn more Rust, but it'd be pretty easy to use
 ## Project Structure
 The project consists of the following files:
 
-main.rs: This file contains the main entry point of the application. It sets up the proxy server, resolves the host, and starts the connection.
-
-connection.rs: This file contains the implementation of the Connection struct and related functions. The Connection struct represents the proxy connection and holds information about the connection state, host, port, and IP address. It also contains methods for resolving the host, starting the connection, handling incoming connections, and forwarding data between the client and server.
+* `main.rs`: Contains the main entry point of the application. It sets up the network connection and handles user input.
+* `lib.rs`: Defines the packet header parsing and handling functions. It uses a HashMap to associate specific header values with corresponding handler functions.
+* `connection.rs`: Defines the Connection struct and its methods. It handles incoming connections and manages data forwarding between the server and connected client.
+ *Add additional header/packet handling functions in lib.rs and register them in the HashMap.*
 
 ### You will need root privileges to run this.
 The application checks the /etc/hosts file for a proxy entry for the specified host. If the entry is found, it displays a message. If the entry is not found, it adds a proxy entry for the host in the /etc/hosts file.
 
+# Limited Example
 
 
-
-
-https://github.com/Libaration/Hablog/assets/11550216/e9964a4a-b530-4934-813f-c4478fc4e4dc
+https://github.com/Libaration/Hablog/assets/11550216/e01ad50f-07e5-4dbf-842e-d4c14cbec4cc
 
