@@ -3,9 +3,12 @@
 //u32 = 4 bytes = 32 bits = 8 hex chars = 0x00000000
 //u64 = 8 bytes = 64 bits = 16 hex chars = 0x0000000000000000
 
-use byteorder::{LittleEndian, ReadBytesExt};
-use std::io::Cursor;
+//the first 4 bytes of each packet seem to be length of the packet
+//the next 2 bytes are the header ?
 
+use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
+use std::io::Cursor;
+pub(crate) static mut DEBUG: bool = false;
 pub struct Packet {
     packet_in_bytes: Vec<u8>,
     cursor: Cursor<Vec<u8>>,
@@ -20,14 +23,33 @@ impl Packet {
     }
 
     fn read_short(&mut self, index: Option<usize>) -> u16 {
-        let index = match index {
-            Some(index) => index,
-            None => self.cursor.position() as usize,
-        };
-        self.cursor.read_u16::<LittleEndian>().unwrap()
+        if let Some(index) = index {
+            self.cursor.set_position(index as u64);
+        }
+        if unsafe { DEBUG } {
+            println!("-------------------------------------------------------");
+            println!("String: {}", String::from_utf8_lossy(&self.packet_in_bytes));
+            if let Some(index) = index {
+                println!(
+                    "Header Hex: {}",
+                    hex::encode(&self.packet_in_bytes[index..index + 2])
+                );
+            }
+        }
+
+        let header = self.cursor.read_u16::<BigEndian>().unwrap();
+        if unsafe { DEBUG } {
+            println!("Header: {}", header);
+            println!(
+                "Read 2 bytes. (+4) Moving cursor index to +{}",
+                self.cursor.position()
+            );
+        }
+
+        header
     }
 
-    fn get_header(&mut self) -> u16 {
+    pub fn get_header(&mut self) -> u16 {
         self.read_short(Some(4))
     }
 }
