@@ -19,3 +19,8 @@ The application checks the /etc/hosts file for a proxy entry for the specified h
 
 https://github.com/Libaration/Hablog/assets/11550216/e01ad50f-07e5-4dbf-842e-d4c14cbec4cc
 
+# Packet Debugging / Triggering on Packet Headers
+
+
+https://github.com/Libaration/Hablog/assets/11550216/303dbbfd-49f6-4dff-bd71-edd6a05e3784
+
