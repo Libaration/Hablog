@@ -8,3 +8,4 @@ crate-type = ["rlib", "dylib"]
 
 [dependencies]
 hex = "0.4.3"
+byteorder = "1.4.3"

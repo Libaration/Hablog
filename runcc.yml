@@ -1,5 +1,5 @@
 commands:
-  bin: |
-    sudo cargo watch -i lib -x "run"
+  hablog: |
+    sudo cargo run -p hablog
   lib: |
     sudo cargo watch -w lib -x "build -p lib"
