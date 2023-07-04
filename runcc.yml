@@ -1,0 +1,5 @@
+commands:
+  bin: |
+    sudo cargo watch -i lib -x "run"
+  lib: |
+    sudo cargo watch -w lib -x "build -p lib"

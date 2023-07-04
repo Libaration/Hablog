@@ -11,7 +11,7 @@ use connection::Connection;
 async fn main() {
     check_if_root();
     let host = String::from("game-us.habbo.com");
-    //check_hosts_file(&host);
+    // check_hosts_file(&host);
     let port = 38101;
     let mut connection = Connection {
         from_ip: None,
@@ -20,7 +20,20 @@ async fn main() {
         connection_state: connection::ConnectionState::Disconnected,
     };
     connection.resolve_host().expect("Could not resolve host");
-    connection.start().await
+    tokio::spawn(async move { connection.start().await });
+    loop {
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .expect("Failed to read line");
+        match input.trim() {
+            "exit!" => {
+                println!("Exiting...");
+                std::process::exit(0);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn check_if_root() {
