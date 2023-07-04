@@ -8,7 +8,6 @@
 
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use std::io::Cursor;
-pub(crate) static mut DEBUG: bool = false;
 pub struct Packet {
     packet_in_bytes: Vec<u8>,
     cursor: Cursor<Vec<u8>>,
@@ -26,30 +25,28 @@ impl Packet {
         if let Some(index) = index {
             self.cursor.set_position(index as u64);
         }
-        if unsafe { DEBUG } {
-            println!("-------------------------------------------------------");
-            println!("String: {}", String::from_utf8_lossy(&self.packet_in_bytes));
-            if let Some(index) = index {
-                println!(
-                    "Header Hex: {}",
-                    hex::encode(&self.packet_in_bytes[index..index + 2])
-                );
-            }
-        }
-
         let header = self.cursor.read_u16::<BigEndian>().unwrap();
-        if unsafe { DEBUG } {
-            println!("Header: {}", header);
-            println!(
-                "Read 2 bytes. (+4) Moving cursor index to +{}",
-                self.cursor.position()
-            );
-        }
-
         header
     }
 
     pub fn get_header(&mut self) -> u16 {
         self.read_short(Some(4))
+    }
+
+    pub fn to_string(&mut self) -> String {
+        let mut packet_string = String::new();
+
+        for x in &self.packet_in_bytes[4..] {
+            //Check if byte is a control character or not
+            if (*x < 32) || *x == 93 || *x == 91 || *x == 125 || *x == 123 || *x == 127 {
+                packet_string.push('[');
+                packet_string.push_str(&((*x).to_string()));
+                packet_string.push(']');
+            } else {
+                packet_string.push(*x as char);
+            }
+        }
+
+        packet_string
     }
 }
