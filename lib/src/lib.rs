@@ -2,6 +2,8 @@ use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::io::{self, BufWriter, Write};
+mod packet;
+use packet::Packet;
 
 type HeaderHandler = fn(&mut [u8]);
 
@@ -23,10 +25,20 @@ pub fn parse(data: &mut [u8], origin: &mut String) {
         return;
     }
     let mut cursor = Cursor::new(&data[0..4]);
-    let header = cursor.read_u32::<BigEndian>().unwrap();
+    let header = cursor.read_u32::<LittleEndian>().unwrap();
     // println!("header: {:?}", header);
     // println!("data from stream: {:?}", &data[0..4]);
-    // println!("data as hex: {:?}", hex::encode(&data[0..4]));
+    if let Some(subdata) = data.get(5..9) {
+        println!("data as hex: {:?}", hex::encode(subdata));
+        println!("data as string: {:?}", String::from_utf8_lossy(subdata));
+        println!("data from stream: {:?}", subdata);
+        println!(
+            "as u32: {:?}",
+            u32::from_le_bytes([subdata[0], subdata[1], subdata[2], subdata[3]])
+        );
+    } else {
+        println!("Index out of range.");
+    }
 
     let encoded_data = hex::encode(&data);
     let output = format!("{} : {}\n", origin, encoded_data);

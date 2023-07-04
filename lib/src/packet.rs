@@ -7,14 +7,14 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::Cursor;
 
 pub struct Packet {
-    packetInBytes: Vec<u8>,
+    packet_in_bytes: Vec<u8>,
     cursor: Cursor<Vec<u8>>,
 }
 
 impl Packet {
     pub fn new(packet: Vec<u8>) -> Self {
         Packet {
-            packetInBytes: packet,
+            packet_in_bytes: packet.clone(),
             cursor: Cursor::new(packet),
         }
     }
