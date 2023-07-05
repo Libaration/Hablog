@@ -1,4 +1,5 @@
 use hot_lib::*;
+
 use std::net::{IpAddr, ToSocketAddrs};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -104,24 +105,23 @@ impl Connection {
         let (mut server_reader, mut server_writer) = connector.into_split();
 
         let (mut client_reader, mut client_writer) = socket.into_split();
-
-        let mut buf = vec![0; 16384];
-        let mut server_buf = vec![0; 16384];
+        let mut buf = Vec::new();
+        let mut server_buf = Vec::new();
 
         let s_spawn = tokio::spawn(async move {
             loop {
-                match server_reader.read(&mut server_buf).await {
+                let mut temp_buf = vec![0; 16384]; // Set an initial buffer size
+                match server_reader.read(&mut temp_buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        // println!("CLIENT -> SERVER, {} bytes sent", n);
-                        //println!("{}", String::from_utf8_lossy(&server_buf[..n]));
-                        // let hex = hex::encode(&server_buf[..n]);
-                        // println!("{}", hex);
-                        parse(&mut server_buf[..n], &mut String::from("CLIENT"));
+                        server_buf.extend_from_slice(&temp_buf[..n]); // Append the received data to server_buf
+
+                        parse(&mut server_buf, &mut String::from("CLIENT"));
                         client_writer
-                            .write_all(&server_buf[..n])
+                            .write_all(&server_buf)
                             .await
                             .expect("Failed to write to client");
+                        server_buf.clear(); // Clear the buffer for the next packet
                     }
                     Err(e) => {
                         println!("Server disconnect");
@@ -131,17 +131,20 @@ impl Connection {
                 }
             }
         });
+
         let c_spawn = tokio::spawn(async move {
             loop {
-                match client_reader.read(&mut buf).await {
+                let mut temp_buf = vec![0u8; 16384]; // Set an initial buffer size
+                match client_reader.read(&mut temp_buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        // println!("SERVER -> CLIENT, {} bytes sent", n);
-                        parse(&mut buf[..n], &mut String::from("SERVER"));
+                        buf.extend_from_slice(&temp_buf[..n]); // Append the received data to buf
+                        parse(&mut buf, &mut String::from("SERVER"));
                         server_writer
-                            .write_all(&buf[..n])
+                            .write_all(&buf)
                             .await
                             .expect("Failed to write to server");
+                        buf.clear(); // Clear the buffer for the next packet
                     }
                     Err(e) => {
                         println!("Client disconnect");
