@@ -17,6 +17,7 @@ pub fn parse(data: &mut [u8], origin: &mut String) {
     let output = format!("{} : {}\n", origin, packet.to_string());
 
     let mut handle = BufWriter::new(io::stdout().lock());
+    handle.flush().unwrap();
     if let Err(_) = handle.write_all(output.as_bytes()) {
         println!("error");
     }
