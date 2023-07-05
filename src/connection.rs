@@ -105,8 +105,8 @@ impl Connection {
 
         let (mut client_reader, mut client_writer) = socket.into_split();
 
-        let mut buf = vec![0; 4096];
-        let mut server_buf = vec![0; 4096];
+        let mut buf = vec![0; 16384];
+        let mut server_buf = vec![0; 16384];
 
         let s_spawn = tokio::spawn(async move {
             loop {
