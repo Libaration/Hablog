@@ -6,8 +6,8 @@
 //the first 4 bytes of each packet seem to be length of the packet
 //the next 2 bytes are the header ?
 
-use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
-use std::io::Cursor;
+use byteorder::{BigEndian, ReadBytesExt};
+use std::io::{Cursor, Read};
 pub struct Packet {
     packet_in_bytes: Vec<u8>,
     cursor: Cursor<Vec<u8>>,
@@ -17,7 +17,7 @@ impl Packet {
     pub fn new(packet: Vec<u8>) -> Self {
         Packet {
             packet_in_bytes: packet.clone(),
-            cursor: Cursor::new(packet),
+            cursor: Cursor::new(packet.clone()),
         }
     }
 
@@ -29,14 +29,39 @@ impl Packet {
         header
     }
 
+    pub fn read_long(&mut self, index: Option<usize>) -> u32 {
+        if let Some(index) = index {
+            self.cursor.set_position(index as u64);
+        }
+        let long = self.cursor.read_u32::<BigEndian>().unwrap();
+        long
+    }
+
     pub fn get_header(&mut self) -> u16 {
         self.read_short(Some(4))
+    }
+
+    pub fn read_bytes(&mut self, length: usize) -> Vec<u8> {
+        let mut bytes = vec![0; length];
+        self.cursor.set_position(0);
+        self.cursor.read_exact(&mut bytes).unwrap();
+        bytes
+    }
+
+    pub fn read_byte(&mut self) -> u8 {
+        self.cursor.set_position(0);
+        let byte = self.cursor.read_u8().unwrap();
+        byte
+    }
+
+    pub fn read_length(&mut self) -> u16 {
+        self.read_short(Some(0))
     }
 
     pub fn to_string(&mut self) -> String {
         let mut packet_string = String::new();
 
-        for x in &self.packet_in_bytes[4..] {
+        for x in &self.packet_in_bytes {
             //Check if byte is a control character or not
             if (*x < 32) || *x == 93 || *x == 91 || *x == 125 || *x == 123 || *x == 127 {
                 packet_string.push('[');
