@@ -1,10 +1,12 @@
 use hot_lib::*;
 
+use crate::packet_handler::PacketHandler;
 use std::net::{IpAddr, ToSocketAddrs};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
+
 #[hot_lib_reloader::hot_module(dylib = "lib")]
 mod hot_lib {
     hot_functions_from_file!("lib/src/lib.rs");
@@ -24,20 +26,13 @@ pub struct Connection {
     pub from_ip: Option<IpAddr>,
     pub port: u16,
     pub host: String,
+    pub packet_handler: PacketHandler,
 }
 
-impl Connection {
-    fn default() -> Self {
-        Self {
-            connection_state: ConnectionState::Disconnected,
-            from_ip: None,
-            port: 38101,
-            host: String::from("game-us.habbo.com"),
-        }
-    }
-
-    pub fn resolve_host(&mut self) -> Result<IpAddr, String> {
+impl<'a> Connection {
+    pub async fn resolve_host(&mut self) -> Result<IpAddr, String> {
         let host = format!("{}:{}", self.host, self.port);
+        println!("Resolving host {}", host);
         match host.to_socket_addrs() {
             Ok(addrs) => {
                 let ip = addrs
@@ -50,7 +45,8 @@ impl Connection {
                     .ok_or_else(|| "No suitable address found".to_string())?;
                 self.connection_state = ConnectionState::Ready;
                 self.from_ip = Some(ip);
-                Ok(ip)
+                println!("Resolved host to {}", self.from_ip.unwrap());
+                Ok(self.from_ip.unwrap())
             }
             Err(e) => {
                 self.connection_state = ConnectionState::Disconnected;
@@ -61,6 +57,7 @@ impl Connection {
 
     pub async fn start(&mut self) {
         let listener = TcpListener::bind(("0.0.0.0", self.port)).await;
+
         match listener {
             Ok(listener) => {
                 println!("Listening for incoming connections on port {}", self.port);
@@ -86,42 +83,31 @@ impl Connection {
     }
 
     async fn handle_incoming_connection(&mut self, mut socket: TcpStream) {
-        println!("Connecting to server...");
-        let mut connector = TcpStream::connect(("54.165.147.223", 38101))
+        println!("Connecting to {}...", self.from_ip.unwrap());
+        let connector = TcpStream::connect((self.from_ip.unwrap(), 38101))
             .await
             .expect("could not connect to server");
-        // match connector {
-        //     Ok(mut stream) => {
-        //         println!("Connected to server");
-        //         self.connection_state = ConnectionState::Connected;
-        //     }
-        //     Err(e) => {
-        //         eprintln!("Failed to connect to server: {}", e);
-        //         self.connection_state = ConnectionState::Disconnected;
-        //         return;
-        //     }
-        // }
 
         let (mut server_reader, mut server_writer) = connector.into_split();
 
         let (mut client_reader, mut client_writer) = socket.into_split();
+
+        let mut packet_handler = self.packet_handler.clone();
         let mut buf = Vec::new();
         let mut server_buf = Vec::new();
-
         let s_spawn = tokio::spawn(async move {
             loop {
-                let mut temp_buf = vec![0; 16384]; // Set an initial buffer size
+                let mut temp_buf = vec![0; 16384];
                 match server_reader.read(&mut temp_buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        server_buf.extend_from_slice(&temp_buf[..n]); // Append the received data to server_buf
-
+                        server_buf.extend_from_slice(&temp_buf[..n]);
                         parse(&mut server_buf, &mut String::from("CLIENT"));
                         client_writer
                             .write_all(&server_buf)
                             .await
                             .expect("Failed to write to client");
-                        server_buf.clear(); // Clear the buffer for the next packet
+                        server_buf.clear();
                     }
                     Err(e) => {
                         println!("Server disconnect");
@@ -134,17 +120,17 @@ impl Connection {
 
         let c_spawn = tokio::spawn(async move {
             loop {
-                let mut temp_buf = vec![0u8; 16384]; // Set an initial buffer size
+                let mut temp_buf = vec![0u8; 16384];
                 match client_reader.read(&mut temp_buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        buf.extend_from_slice(&temp_buf[..n]); // Append the received data to buf
+                        buf.extend_from_slice(&temp_buf[..n]);
                         parse(&mut buf, &mut String::from("SERVER"));
                         server_writer
                             .write_all(&buf)
                             .await
                             .expect("Failed to write to server");
-                        buf.clear(); // Clear the buffer for the next packet
+                        buf.clear();
                     }
                     Err(e) => {
                         println!("Client disconnect");

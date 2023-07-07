@@ -1,40 +1,52 @@
-//u8 = 1 byte = 8 bits = 2 hex chars = 0x00
-//u16 = 2 bytes = 16 bits = 4 hex chars = 0x0000
-//u32 = 4 bytes = 32 bits = 8 hex chars = 0x00000000
-//u64 = 8 bytes = 64 bits = 16 hex chars = 0x0000000000000000
-
-//the first 4 bytes of each packet seem to be length of the packet
-//the next 2 bytes are the header ?
-
 use byteorder::{BigEndian, ReadBytesExt};
-use std::io::{Cursor, Read};
+use std::io::Cursor;
+
+#[derive(Hash, Eq, PartialEq, Debug, Clone)]
 pub struct Packet {
-    packet_in_bytes: Vec<u8>,
-    cursor: Cursor<Vec<u8>>,
+    packet_in_bytes: Option<Vec<u8>>,
+    bytes: Vec<u8>,
+    position: usize,
+    name: Option<String>,
+    header: Option<u16>,
+    direction: Option<String>,
 }
 
 impl Packet {
-    pub fn new(packet: Vec<u8>) -> Self {
+    pub fn new(
+        mut packet: Option<Vec<u8>>,
+        name: Option<String>,
+        header: Option<u16>,
+        direction: Option<String>,
+    ) -> Self {
+        let bytes = packet.clone().unwrap_or_default();
         Packet {
-            packet_in_bytes: packet.clone(),
-            cursor: Cursor::new(packet.clone()),
+            packet_in_bytes: packet,
+            bytes,
+            position: 0,
+            name,
+            header,
+            direction,
         }
     }
 
     fn read_short(&mut self, index: Option<usize>) -> u16 {
         if let Some(index) = index {
-            self.cursor.set_position(index as u64);
+            self.position = index;
         }
-        let header = self.cursor.read_u16::<BigEndian>().unwrap();
-        header
+        let value = &self.bytes[self.position..];
+        self.position += 2;
+        let mut cursor = Cursor::new(value);
+        cursor.read_u16::<BigEndian>().unwrap()
     }
 
     pub fn read_long(&mut self, index: Option<usize>) -> u32 {
         if let Some(index) = index {
-            self.cursor.set_position(index as u64);
+            self.position = index;
         }
-        let long = self.cursor.read_u32::<BigEndian>().unwrap();
-        long
+        let value = &self.bytes[self.position..];
+        self.position += 4;
+        let mut cursor = Cursor::new(value);
+        cursor.read_u32::<BigEndian>().unwrap()
     }
 
     pub fn get_header(&mut self) -> u16 {
@@ -42,30 +54,29 @@ impl Packet {
     }
 
     pub fn read_bytes(&mut self, length: usize) -> Vec<u8> {
-        let mut bytes = vec![0; length];
-        self.cursor.set_position(0);
-        self.cursor.read_exact(&mut bytes).unwrap();
-        bytes
+        let value = &self.bytes[self.position..self.position + length];
+        self.position += length;
+        value.to_vec()
     }
 
     pub fn read_byte(&mut self) -> u8 {
-        self.cursor.set_position(0);
-        let byte = self.cursor.read_u8().unwrap();
-        byte
+        let value = self.bytes[self.position];
+        self.position += 1;
+        value
     }
 
     pub fn read_length(&mut self) -> u16 {
         self.read_short(Some(0))
     }
 
-    pub fn to_string(&mut self) -> String {
+    pub fn to_string(&self) -> String {
         let mut packet_string = String::new();
 
-        for x in &self.packet_in_bytes {
-            //Check if byte is a control character or not
-            if (*x < 32) || *x == 93 || *x == 91 || *x == 125 || *x == 123 || *x == 127 {
+        for x in &self.bytes {
+            // Check if byte is a control character or not
+            if (*x < 32 && *x >= 0) || *x == 93 || *x == 91 || *x == 125 || *x == 123 || *x == 127 {
                 packet_string.push('[');
-                packet_string.push_str(&((*x).to_string()));
+                packet_string.push_str(&x.to_string());
                 packet_string.push(']');
             } else {
                 packet_string.push(*x as char);

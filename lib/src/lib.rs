@@ -1,5 +1,5 @@
 use std::io::{self, BufWriter, Write};
-mod packet;
+pub mod packet;
 use packet::Packet;
 
 #[no_mangle]
@@ -7,7 +7,7 @@ pub fn parse(data: &mut [u8], origin: &mut String) {
     if origin == "SERVER" {
         return;
     }
-    let mut packet = Packet::new(data.to_vec());
+    let mut packet = Packet::new(Some(data.to_vec()), None, None, Some(origin.to_string()));
     // let header = packet.get_header();
     // if header == 3655 && String::from_utf8_lossy(&data).contains("!debug on") {
     //     unsafe { packet::DEBUG = true };
