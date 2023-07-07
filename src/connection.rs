@@ -108,6 +108,7 @@ impl<'a> Connection {
                             .await
                             .expect("Failed to write to client");
                         server_buf.clear();
+                        client_writer.flush().await.unwrap();
                     }
                     Err(e) => {
                         println!("Server disconnect");
@@ -131,6 +132,7 @@ impl<'a> Connection {
                             .await
                             .expect("Failed to write to server");
                         buf.clear();
+                        server_writer.flush().await.unwrap();
                     }
                     Err(e) => {
                         println!("Client disconnect");
