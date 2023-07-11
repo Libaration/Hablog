@@ -1,43 +1,37 @@
-use std::{
-    fs::File,
-    fs::OpenOptions,
-    io::{Read, Write},
-    time::Duration,
-};
 mod connection;
-mod packet_handler;
+pub mod hosts;
+pub mod logger;
+pub mod proxy;
 use connection::Connection;
 use lib::packet::Packet;
-use tokio::{
-    fs::{read_to_string, write},
-    io::AsyncWriteExt,
-};
-use tokio::{
-    signal::unix::{signal, SignalKind},
-    time::sleep,
-};
+use logger::ConsoleLogger;
+use tokio::signal::unix::{signal, SignalKind};
+// lazy_static::lazy_static! {
+//     static ref PACKET_HANDLER: tokio::sync::Mutex<packet_handler::PacketHandler> = tokio::sync::Mutex::new(packet_handler::PacketHandler::new());
+
+// }
 
 #[tokio::main]
 
 async fn main() {
     check_if_root();
-    let host = String::from("game-us.habbo.com");
+    ConsoleLogger::normal("Preparing connection...");
+    let game_host = String::from("game-us.habbo.com");
     let port = 38101;
-    remove_proxy_entry(&host).await;
-    sleep(Duration::from_secs(1)).await;
+    let client_host = String::from("127.0.0.1");
     let mut connection = Connection {
-        from_ip: None,
+        game_resolved_ip: None,
         port,
-        host,
+        game_host,
         connection_state: connection::ConnectionState::Disconnected,
-        packet_handler: packet_handler::PacketHandler::new(),
+        // packet_handler: &PACKET_HANDLER,
+        client_host,
     };
 
-    println!("Initializing PacketHandler...");
+    ConsoleLogger::normal("Initializing PacketHandler...");
     // println!("Waiting for packets...");
     // connection.packet_handler.add_packets(fetch_packets().await);
-    connection.resolve_host().await.unwrap();
-    add_proxy_entry(&connection.host).await;
+
     tokio::spawn(async move {
         connection.start().await;
     });
@@ -53,54 +47,6 @@ fn check_if_root() {
         println!("You must run this program as root.");
         std::process::exit(1);
     }
-}
-
-async fn check_hosts_file(host: &str) -> bool {
-    let hosts_file_path = "/etc/hosts";
-    let contents = read_to_string(hosts_file_path).await.unwrap();
-    let proxy_entry_exists = contents.lines().any(|line| line.contains(host));
-
-    if proxy_entry_exists {
-        println!("Found proxy entry for {}.", host);
-    } else {
-        println!("No proxy entry found for {}.", host);
-    }
-    proxy_entry_exists
-}
-
-async fn remove_proxy_entry(host: &str) {
-    println!("Removing proxy entry for {}...", host);
-    let hosts_file_path = "/etc/hosts";
-    let contents = read_to_string(hosts_file_path)
-        .await
-        .expect("Failed to read hosts file");
-    let filtered_lines: Vec<&str> = contents
-        .lines()
-        .filter(|line| !line.contains(host))
-        .collect();
-    write(hosts_file_path, filtered_lines.join("\n"))
-        .await
-        .unwrap();
-}
-
-async fn add_proxy_entry(host: &str) {
-    let hosts_file_path = "/etc/hosts";
-    let mut contents = read_to_string(hosts_file_path).await.unwrap();
-    if contents.lines().any(|line| line.contains(host)) {
-        println!("Proxy entry for {} already exists.", host);
-        return;
-    }
-    let entry = format!("127.0.0.1 {}", host);
-    contents.push('\n');
-    contents.push_str(&entry);
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(hosts_file_path)
-        .await
-        .expect("Failed to open hosts file");
-    file.write_all(&contents.as_bytes()).await.unwrap();
-    println!("Proxy entry added for {}.", host);
 }
 
 async fn fetch_packets() -> Vec<Packet> {
@@ -121,17 +67,14 @@ async fn fetch_packets() -> Vec<Packet> {
         let name = packet
             .get("name")
             .and_then(|name| name.as_str())
-            .expect("Failed to get packet name");
+            .expect("Failed to get packet name")
+            .to_owned();
         let header = packet
             .get("id")
             .and_then(|header| header.as_u64())
             .expect("Failed to get packet header") as u16;
-        let packet = Packet::new(
-            None,
-            Some(name.to_owned()),
-            Some(header),
-            Some("Outgoing".to_owned()),
-        );
+
+        let packet = Packet::new(None, Some(name), Some(header), Some("Outgoing"));
         packets.push(packet);
     }
     packets
