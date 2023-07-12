@@ -3,29 +3,29 @@ use std::io::Cursor;
 
 #[derive(Hash, Eq, PartialEq, Debug, Clone)]
 pub struct Packet {
-    packet_in_bytes: Option<Vec<u8>>,
-    bytes: Vec<u8>,
-    position: usize,
-    name: Option<String>,
-    header: Option<u16>,
-    direction: Option<String>,
+    pub packet_in_bytes: Option<Vec<u8>>,
+    pub bytes: Vec<u8>,
+    pub position: usize,
+    pub name: Option<String>,
+    pub header: Option<u16>,
+    pub direction: Option<&'static str>, // Incoming or Outgoing. Never changes thus I think it's better to be static?
 }
 
 impl Packet {
     pub fn new(
-        mut packet: Option<Vec<u8>>,
+        packet: Option<Vec<u8>>,
         name: Option<String>,
         header: Option<u16>,
-        direction: Option<String>,
+        direction: Option<&'static str>,
     ) -> Self {
-        let bytes = packet.clone().unwrap_or_default();
+        let bytes = packet.clone();
         Packet {
-            packet_in_bytes: packet,
-            bytes,
+            packet_in_bytes: Some(packet).unwrap_or_default(),
+            bytes: bytes.unwrap_or_default(),
             position: 0,
-            name,
+            name: Some(name).unwrap(),
             header,
-            direction,
+            direction: Some(direction).unwrap(),
         }
     }
 

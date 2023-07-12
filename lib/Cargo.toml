@@ -10,3 +10,4 @@ crate-type = ["rlib", "dylib"]
 hex = "0.4.3"
 byteorder = "1.4.3"
 base64 = "0.21.2"
+lazy_static = "1.4.0"

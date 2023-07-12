@@ -2,6 +2,9 @@ mod connection;
 pub mod hosts;
 pub mod logger;
 pub mod proxy;
+pub mod packet_handler {
+    pub mod packet_handler;
+}
 use connection::Connection;
 use lib::packet::Packet;
 use logger::ConsoleLogger;
