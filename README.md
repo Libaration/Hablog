@@ -1,6 +1,6 @@
 # Hablog
 This project is a simple TCP proxy implemented in Rust using the Tokio asynchronous runtime. 
-It allows forwarding network traffic between a client and a server. It logs the packets (kinda... buffer is wrong so message sizes are all over the place I think) sent between the client and server.
+It allows forwarding network traffic between a client and a server. It logs the packets (client only)
 This was kinda just an excuse to learn more Rust, but it'd be pretty easy to use as a starting point to add packet headers / packet sending.
 
 ## Project Structure
@@ -19,8 +19,11 @@ The application checks the /etc/hosts file for a proxy entry for the specified h
 
 https://github.com/Libaration/Hablog/assets/11550216/e01ad50f-07e5-4dbf-842e-d4c14cbec4cc
 
-# Packet Debugging / Triggering on Packet Headers
+# Packet Debugging
 
 
-https://github.com/Libaration/Hablog/assets/11550216/303dbbfd-49f6-4dff-bd71-edd6a05e3784
+https://github.com/Libaration/Hablog/assets/11550216/8865c60e-22a4-442c-9528-f77280a6472a
+
+
+
 
