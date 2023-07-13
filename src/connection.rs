@@ -4,7 +4,7 @@ use std::net::IpAddr;
 
 #[hot_lib_reloader::hot_module(dylib = "lib")]
 mod hot_lib {
-    hot_functions_from_file!("lib/src/lib.rs");
+    // hot_functions_from_file!("lib/src/lib.rs");
 }
 
 #[derive(Debug, PartialEq, Clone)]

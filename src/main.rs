@@ -3,11 +3,13 @@ pub mod hosts;
 pub mod logger;
 pub mod proxy;
 pub mod packet_handler {
+    pub mod packet;
     pub mod packet_handler;
 }
 use connection::Connection;
-use lib::packet::Packet;
 use logger::ConsoleLogger;
+use packet_handler::packet::Packet;
+
 use tokio::signal::unix::{signal, SignalKind};
 // lazy_static::lazy_static! {
 //     static ref PACKET_HANDLER: tokio::sync::Mutex<packet_handler::PacketHandler> = tokio::sync::Mutex::new(packet_handler::PacketHandler::new());
@@ -77,7 +79,7 @@ async fn fetch_packets() -> Vec<Packet> {
             .and_then(|header| header.as_u64())
             .expect("Failed to get packet header") as u16;
 
-        let packet = Packet::new(None, Some(name), Some(header), Some("Outgoing"));
+        let packet = Packet::new(None, Some(name), Some(header), "Outgoing");
         packets.push(packet);
     }
     packets

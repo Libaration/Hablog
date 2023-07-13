@@ -35,11 +35,11 @@ impl Proxy<'_> {
             .into_split();
 
         let forward_buffers_client_to_server = tokio::spawn(async move {
-            Self::forward_buffers(client_socket.0, server_socket.1, "Out".to_string()).await;
+            Self::forward_buffers(client_socket.0, server_socket.1, "Out").await;
         });
 
         let forward_buffers_server_to_client = tokio::spawn(async move {
-            Self::forward_buffers(server_socket.0, client_socket.1, "In".to_string()).await;
+            Self::forward_buffers(server_socket.0, client_socket.1, "In").await;
         });
 
         let (res1, res2) = tokio::join!(
@@ -102,14 +102,14 @@ impl Proxy<'_> {
     pub async fn forward_buffers(
         source_stream: tokio::net::tcp::OwnedReadHalf,
         destination_stream: tokio::net::tcp::OwnedWriteHalf,
-        direction: String,
+        direction: &'static str,
     ) {
         let mut buffer = [0u8; 10000];
         let mut source_reader = BufReader::new(source_stream);
 
         let destination_stream_arc = Arc::new(Mutex::new(destination_stream));
 
-        let mut packet_handler = PacketHandler::new(&destination_stream_arc, direction);
+        let mut packet_handler = PacketHandler::new(&destination_stream_arc, &direction);
         loop {
             //buffer.fill(0);
             let read_length = match source_reader.read(&mut buffer).await {
