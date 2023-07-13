@@ -1,3 +1,4 @@
+use crate::packet_handler::packet::Packet;
 use std::{
     fmt::{Debug, Display},
     io::Write,
@@ -17,6 +18,43 @@ impl ConsoleLogger {
         write!(&mut stdout, "{}", log_prefix).unwrap();
         stdout.set_color(&ColorSpec::new().set_reset(true)).unwrap();
         writeln!(&mut stdout, ":: {}", message).unwrap();
+    }
+
+    pub fn log_packet<T: Debug>(mut packet: Packet, body: &[u8]) {
+        let mut stdout = StandardStream::stdout(ColorChoice::Always);
+        let log_prefix = format!("[{}]", packet.direction);
+        let header = format!("[{}]", packet.get_header());
+        let name = format!("[{}]", packet.name.unwrap_or_default());
+
+        let body = format!("[{}]", filter_special_chars(body));
+
+        stdout
+            .set_color(ColorSpec::new().set_bold(true).set_fg(Some(Color::Red)))
+            .unwrap();
+        write!(&mut stdout, "{}", log_prefix).unwrap();
+        stdout.set_color(ColorSpec::new().set_reset(true)).unwrap();
+
+        stdout
+            .set_color(ColorSpec::new().set_bold(true).set_fg(Some(Color::Cyan)))
+            .unwrap();
+        write!(&mut stdout, "{}", header).unwrap();
+        stdout.set_color(ColorSpec::new().set_reset(true)).unwrap();
+
+        stdout
+            .set_color(ColorSpec::new().set_bold(true).set_fg(Some(Color::Yellow)))
+            .unwrap();
+        write!(&mut stdout, "{}", name).unwrap();
+        stdout.set_color(ColorSpec::new().set_reset(true)).unwrap();
+
+        stdout
+            .set_color(ColorSpec::new().set_bold(true).set_fg(Some(Color::Green)))
+            .unwrap();
+        writeln!(&mut stdout, "{}", body).unwrap();
+        stdout.set_color(ColorSpec::new().set_reset(true)).unwrap();
+        fn filter_special_chars(data: &[u8]) -> String {
+            let body = String::from_utf8_lossy(data).trim().to_string();
+            body.chars().filter(|c| !c.is_control()).collect::<String>()
+        }
     }
 
     pub fn info<T: Display>(message: T) {

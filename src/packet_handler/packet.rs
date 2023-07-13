@@ -1,6 +1,6 @@
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use std::io::Cursor;
-
+use std::io::Read;
 #[derive(Hash, Eq, PartialEq, Debug, Clone)]
 pub struct Packet {
     pub packet_in_bytes: Option<Vec<u8>>,
@@ -46,7 +46,10 @@ impl Packet {
         let value = &self.bytes[self.position..];
         self.position += 2;
         let mut cursor = Cursor::new(value);
-        cursor.read_u16::<BigEndian>().unwrap()
+        match cursor.read_u16::<BigEndian>() {
+            Ok(value) => value,
+            Err(_) => 0,
+        }
     }
 
     pub fn read_long(&mut self, index: Option<usize>) -> u32 {
@@ -63,10 +66,25 @@ impl Packet {
         self.read_short(Some(4))
     }
 
-    pub fn read_bytes(&mut self, length: usize) -> Vec<u8> {
-        let value = &self.bytes[self.position..self.position + length];
+    pub fn get_body(&mut self) -> Vec<u8> {
+        let bytes = if let Some(bytes) = self.packet_in_bytes.clone() {
+            self.read_bytes(bytes.len() - 6, Some(6))
+        } else {
+            Vec::new()
+        };
+        bytes
+    }
+
+    pub fn read_bytes(&mut self, length: usize, index: Option<usize>) -> Vec<u8> {
+        if let Some(index) = index {
+            self.position = index;
+        }
+        let value = &self.bytes[self.position..];
         self.position += length;
-        value.to_vec()
+        let mut cursor = Cursor::new(value);
+        let mut bytes = vec![0; length];
+        cursor.read_exact(&mut bytes).unwrap();
+        bytes
     }
 
     pub fn read_byte(&mut self) -> u8 {

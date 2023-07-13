@@ -2,7 +2,11 @@ use crate::logger::ConsoleLogger;
 use crate::packet_handler::packet::Packet;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 
+lazy_static::lazy_static! {
+    static ref PACKET_COLLECTION: Mutex<Vec<Packet>> = Mutex::new(vec![]);
+}
 #[derive(Debug, Clone)]
 pub struct PacketHandler<'a> {
     out_stream: &'a Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
@@ -25,7 +29,7 @@ impl PacketHandler<'_> {
         out_stream.write_all(buf).await.unwrap();
         out_stream.flush().await.unwrap();
         // ConsoleLogger::info(format!("Packet: {}", String::from_utf8_lossy(buf)));
-        self.process(&mut buf.to_vec());
+        self.process(&mut buf.to_vec()).await;
     }
 
     pub fn extract_packet(&self, buffer: &mut Vec<u8>) -> Vec<Packet> {
@@ -53,10 +57,30 @@ impl PacketHandler<'_> {
         return Vec::new();
     }
 
-    fn process(&mut self, buffer: &mut Vec<u8>) -> Vec<Packet> {
+    async fn get_packet_info(mut packet: Packet) -> Packet {
+        let packet_header = packet.get_header();
+        let packet_info = {
+            let collection_lock = PACKET_COLLECTION.lock().await;
+            collection_lock
+                .iter()
+                .find(|packet_info| packet_info.header == Some(packet_header))
+                .cloned()
+        };
+        let packet_info = match packet_info {
+            Some(info) => info,
+            None => packet.clone(),
+        };
+        let packet_name = packet_info.name.clone();
+
+        packet.name = packet_name;
+
+        packet
+    }
+
+    async fn process(&mut self, buffer: &mut Vec<u8>) {
         let direction_ref = &self.direction;
         if buffer.len() < 6 || direction_ref == &"Out" {
-            return Vec::new();
+            return ();
         }
 
         let mut constructor_packet = Packet::new(Some(buffer.to_vec()), None, None, direction_ref);
@@ -66,7 +90,7 @@ impl PacketHandler<'_> {
         while constructor_packet.total_bytes() >= 4
             && constructor_packet.total_bytes() - 4 >= constructor_packet.read_length() as usize
         {
-            let new_packet = Packet::new(
+            let mut new_packet = Packet::new(
                 Some(Self::copy_with_padding(
                     &buffer,
                     0,
@@ -78,6 +102,8 @@ impl PacketHandler<'_> {
             );
 
             //advance the buffer to the next packet
+            new_packet = Self::get_packet_info(new_packet).await;
+            let packet_clone = new_packet.clone();
             packets_collection.push(new_packet);
             *buffer = Self::copy_with_padding(
                 &buffer,
@@ -85,22 +111,17 @@ impl PacketHandler<'_> {
                 buffer.len(),
             );
             constructor_packet = Packet::new(Some(buffer.to_vec()), None, None, direction_ref);
+            tokio::spawn(async move { Self::process_packet(packet_clone) }).await;
         }
-        match packets_collection.len() {
-            0 => {}
-            1 => {
-                println!(
-                    "Packet: {}",
-                    String::from_utf8_lossy(
-                        &packets_collection[0].packet_in_bytes.as_ref().unwrap()
-                    )
-                );
-            }
-            _ => {
-                println!("Multiple packets");
-            }
-        }
-        packets_collection
+    }
+
+    pub fn process_packet(mut packet: Packet) {
+        // let packet_name = packet.name.clone().unwrap();
+        // let packet_header = packet.get_header();
+        let packet_body = packet.get_body();
+        // let packet_direction = packet.direction.clone();
+
+        ConsoleLogger::log_packet::<Packet>(packet, &packet_body);
     }
 
     pub fn copy_with_padding(original: &[u8], from: usize, to: usize) -> Vec<u8> {
@@ -116,5 +137,35 @@ impl PacketHandler<'_> {
         }
 
         result
+    }
+
+    pub async fn fetch_packets() {
+        let url = "https://api.sulek.dev/releases/MAC63-202307041149-55201637/messages";
+        let response = reqwest::get(url)
+            .await
+            .expect("Failed to fetch packets")
+            .json::<serde_json::Value>()
+            .await
+            .expect("Failed to parse JSON");
+
+        let response_packets = response
+            .get("messages")
+            .and_then(|messages| messages.get("incoming"))
+            .and_then(|incoming| incoming.as_array())
+            .expect("Failed to get incoming packets");
+        for packet in response_packets {
+            let name = packet
+                .get("name")
+                .and_then(|name| name.as_str())
+                .expect("Failed to get packet name")
+                .to_owned();
+            let header = packet
+                .get("id")
+                .and_then(|header| header.as_u64())
+                .expect("Failed to get packet header") as u16;
+
+            let packet = Packet::new(None, Some(name), Some(header), "Out");
+            PACKET_COLLECTION.lock().await.push(packet);
+        }
     }
 }
