@@ -1,4 +1,4 @@
-use byteorder::{BigEndian, ReadBytesExt};
+use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use std::io::Cursor;
 
 #[derive(Hash, Eq, PartialEq, Debug, Clone)]
@@ -8,7 +8,7 @@ pub struct Packet {
     pub position: usize,
     pub name: Option<String>,
     pub header: Option<u16>,
-    pub direction: Option<&'static str>, // Incoming or Outgoing. Never changes thus I think it's better to be static?
+    pub direction: &'static str, // Incoming or Outgoing. Never changes thus I think it's better to be static?
 }
 
 impl Packet {
@@ -16,17 +16,27 @@ impl Packet {
         packet: Option<Vec<u8>>,
         name: Option<String>,
         header: Option<u16>,
-        direction: Option<&'static str>,
+        direction: &'static str,
     ) -> Self {
         let bytes = packet.clone();
         Packet {
-            packet_in_bytes: Some(packet).unwrap_or_default(),
+            packet_in_bytes: Some(packet).unwrap(),
             bytes: bytes.unwrap_or_default(),
             position: 0,
             name: Some(name).unwrap(),
             header,
-            direction: Some(direction).unwrap(),
+            direction,
         }
+    }
+
+    fn read_u32(&mut self, index: Option<usize>) -> u32 {
+        if let Some(index) = index {
+            self.position = index;
+        }
+        let value = &self.bytes[self.position..];
+        self.position += 4;
+        let mut cursor = Cursor::new(value);
+        cursor.read_u32::<BigEndian>().unwrap()
     }
 
     fn read_short(&mut self, index: Option<usize>) -> u16 {
@@ -65,8 +75,11 @@ impl Packet {
         value
     }
 
-    pub fn read_length(&mut self) -> u16 {
-        self.read_short(Some(0))
+    pub fn total_bytes(&self) -> usize {
+        self.bytes.len()
+    }
+    pub fn read_length(&mut self) -> u32 {
+        self.read_u32(Some(0))
     }
 
     pub fn to_string(&self) -> String {
