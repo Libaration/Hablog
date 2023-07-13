@@ -1,36 +1,20 @@
-use core::ops::Deref;
-use lib::packet::Packet;
-use std::{
-    collections::{HashSet, VecDeque},
-    sync::Arc,
-};
-use tokio::{
-    io::{AsyncWriteExt, BufWriter},
-    sync::Mutex,
-};
-
 use crate::logger::ConsoleLogger;
-#[derive(Debug)]
-pub enum PacketResult<'a> {
-    Owned(Packet),
-    Static(&'a Packet),
-}
+use crate::packet_handler::packet::Packet;
+use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
+
 #[derive(Debug, Clone)]
 pub struct PacketHandler<'a> {
-    packet_queue: VecDeque<Packet>,
-    packets: HashSet<Packet>,
     out_stream: &'a Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
-    direction: String,
+    direction: &'static str,
 }
 
 impl PacketHandler<'_> {
     pub fn new<'a>(
         out_stream: &'a Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
-        direction: String,
+        direction: &'static str,
     ) -> PacketHandler<'a> {
         PacketHandler {
-            packets: HashSet::new(),
-            packet_queue: VecDeque::new(),
             out_stream,
             direction,
         }
@@ -40,22 +24,23 @@ impl PacketHandler<'_> {
         let mut out_stream = self.out_stream.lock().await;
         out_stream.write_all(buf).await.unwrap();
         out_stream.flush().await.unwrap();
-        ConsoleLogger::info(format!("Packet: {}", String::from_utf8_lossy(buf)));
+        // ConsoleLogger::info(format!("Packet: {}", String::from_utf8_lossy(buf)));
+        self.process(&mut buf.to_vec());
     }
 
-    pub fn extract_packet(&self, buffer: &mut Vec<u8>) -> PacketResult {
+    pub fn extract_packet(&self, buffer: &mut Vec<u8>) -> Vec<Packet> {
         // Check if the buffer has enough data for a complete packet via the first 4 bytes which should give length
         if buffer.len() < 6 {
-            return PacketResult::Static(Self::empty_packet());
+            return Vec::new();
         }
 
         // get the packet length from the first 4 bytes
-        let mut packet = Packet::new(Some(buffer.to_vec()), None, None, Some("Outgoing"));
+        let mut packet = Packet::new(Some(buffer.to_vec()), None, None, "Outgoing");
         let packet_length = packet.read_length() as usize;
 
         // but does the packet length it told us match the actual length of the buffer?
         if buffer.len() < packet_length {
-            return PacketResult::Static(Self::empty_packet());
+            return Vec::new();
         }
 
         // get header and body from packet
@@ -65,55 +50,71 @@ impl PacketHandler<'_> {
         // take the processed packet out of the buffer
         buffer.drain(0..packet_length);
 
-        //  still in debate if my packet attribute should contain the full packet bytes or just the body
-        PacketResult::Owned(Packet::new(
-            Some(buffer.to_vec()),
-            None,
-            Some(header_value),
-            Some("Outgoing"),
-        ))
-    }
-    fn empty_packet() -> &'static Packet {
-        //i'm thinkin if we create a static reference to an empty packet
-        //when we need to return on invalid buffers this will be more performant??
-        //as it won't have to create a new packet every time and will just return the static reference in memory
-        //i could also be totally wrong. this could be worse idk.
-        static EMPTY_PACKET: Packet = Packet {
-            packet_in_bytes: None,
-            position: 0,
-            name: None,
-            header: None,
-            direction: None,
-            bytes: Vec::new(),
-        };
-
-        &EMPTY_PACKET
+        return Vec::new();
     }
 
-    pub fn handle_buffer(&mut self, buf: &[u8]) -> Packet {
-        // Process the buffer and create a new packet
-        let packet = Packet::new(None, None, None, None);
-
-        // Check for duplicates and add the packet
-        if !self.packets.contains(&packet) {
-            self.packets.insert(packet.clone());
-            self.packet_queue.push_back(packet.clone());
+    fn process(&mut self, buffer: &mut Vec<u8>) -> Vec<Packet> {
+        let direction_ref = &self.direction;
+        if buffer.len() < 6 || direction_ref == &"Out" {
+            return Vec::new();
         }
 
-        // Return the created packet
-        packet
-    }
+        let mut constructor_packet = Packet::new(Some(buffer.to_vec()), None, None, direction_ref);
 
-    pub fn get_next_packet(&mut self) -> Option<Packet> {
-        self.packet_queue.pop_front()
-    }
+        let mut packets_collection: Vec<Packet> = Vec::new();
 
-    pub fn add_packets(&mut self, packets: Vec<Packet>) {
-        for packet in packets {
-            if !self.packets.contains(&packet) {
-                self.packets.insert(packet.clone());
-                self.packet_queue.push_back(packet.clone());
+        while constructor_packet.total_bytes() >= 4
+            && constructor_packet.total_bytes() - 4 >= constructor_packet.read_length() as usize
+        {
+            let new_packet = Packet::new(
+                Some(Self::copy_with_padding(
+                    &buffer,
+                    0,
+                    constructor_packet.read_length() as usize + 4,
+                )),
+                None,
+                None,
+                direction_ref,
+            );
+
+            //advance the buffer to the next packet
+            packets_collection.push(new_packet);
+            *buffer = Self::copy_with_padding(
+                &buffer,
+                constructor_packet.read_length() as usize + 4,
+                buffer.len(),
+            );
+            constructor_packet = Packet::new(Some(buffer.to_vec()), None, None, direction_ref);
+        }
+        match packets_collection.len() {
+            0 => {}
+            1 => {
+                println!(
+                    "Packet: {}",
+                    String::from_utf8_lossy(
+                        &packets_collection[0].packet_in_bytes.as_ref().unwrap()
+                    )
+                );
+            }
+            _ => {
+                println!("Multiple packets");
             }
         }
+        packets_collection
+    }
+
+    pub fn copy_with_padding(original: &[u8], from: usize, to: usize) -> Vec<u8> {
+        let length = original.len();
+        let padding = if to > length { to - length } else { 0 };
+        let padded_to = to + padding;
+
+        let mut result = Vec::with_capacity(padded_to - from);
+        result.extend_from_slice(&original[from..to]);
+
+        if padding > 0 {
+            result.extend(vec![0; padding]);
+        }
+
+        result
     }
 }
