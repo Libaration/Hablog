@@ -1,3 +1,4 @@
+use crate::model::Direction;
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use std::io::Cursor;
 use std::io::Read;
@@ -8,7 +9,7 @@ pub struct Packet {
     pub position: usize,
     pub name: Option<String>,
     pub header: Option<u16>,
-    pub direction: &'static str, // Incoming or Outgoing. Never changes thus I think it's better to be static?
+    pub direction: Direction,
 }
 
 impl Packet {
@@ -16,7 +17,7 @@ impl Packet {
         packet: Option<Vec<u8>>,
         name: Option<String>,
         header: Option<u16>,
-        direction: &'static str,
+        direction: Direction,
     ) -> Self {
         let bytes = packet.clone();
         Packet {

@@ -1,4 +1,6 @@
+use crate::model::Direction;
 use crate::packet_handler::packet::Packet;
+use chrono::Local;
 use std::{
     fmt::{Debug, Display},
     io::Write,
@@ -8,8 +10,15 @@ use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 pub struct ConsoleLogger {}
 
 impl ConsoleLogger {
+    fn print_timestamp(stdout: &mut StandardStream) {
+        stdout.set_color(ColorSpec::new().set_dimmed(true)).unwrap();
+        write!(stdout, "{} ", Local::now().format("%H:%M:%S%.3f")).unwrap();
+        stdout.set_color(&ColorSpec::new().set_reset(true)).unwrap();
+    }
+
     fn print_log<T: Display>(level: &str, message: T, color: Color) {
         let mut stdout = StandardStream::stdout(ColorChoice::Always);
+        Self::print_timestamp(&mut stdout);
         let log_prefix = format!("[hablog]{}", level);
 
         stdout
@@ -22,14 +31,23 @@ impl ConsoleLogger {
 
     pub fn log_packet<T: Debug>(mut packet: Packet, body: &[u8]) {
         let mut stdout = StandardStream::stdout(ColorChoice::Always);
-        let log_prefix = format!("[{}]", packet.direction);
+        Self::print_timestamp(&mut stdout);
+        let log_prefix = format!("[{}]", packet.direction.short());
+        let direction_color = match packet.direction {
+            Direction::ServerToClient => Color::Red,
+            Direction::ClientToServer => Color::Magenta,
+        };
         let header = format!("[{}]", packet.get_header());
         let name = format!("[{}]", packet.name.unwrap_or_default());
 
         let body = format!("[{}]", filter_special_chars(body));
 
         stdout
-            .set_color(ColorSpec::new().set_bold(true).set_fg(Some(Color::Red)))
+            .set_color(
+                ColorSpec::new()
+                    .set_bold(true)
+                    .set_fg(Some(direction_color)),
+            )
             .unwrap();
         write!(&mut stdout, "{}", log_prefix).unwrap();
         stdout.set_color(ColorSpec::new().set_reset(true)).unwrap();
@@ -69,10 +87,10 @@ impl ConsoleLogger {
         Self::print_log("", message, Color::Yellow);
     }
 
-    pub fn error<T: Debug>(error: T) {
-        let error_message = format!("{:?}", error);
-        let log_message = format!("[hablog]:: Error: {}", error_message);
+    pub fn error<T: Display>(error: T) {
+        let log_message = format!("[hablog]:: Error: {}", error);
         let mut stdout = StandardStream::stdout(ColorChoice::Always);
+        Self::print_timestamp(&mut stdout);
 
         stdout
             .set_color(

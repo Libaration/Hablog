@@ -1,171 +1,232 @@
 use crate::logger::ConsoleLogger;
+use crate::model::Direction;
 use crate::packet_handler::packet::Packet;
-use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
+use std::collections::HashMap;
+use std::time::Duration;
 
-lazy_static::lazy_static! {
-    static ref PACKET_COLLECTION: Mutex<Vec<Packet>> = Mutex::new(vec![]);
+const PACKETS_URL: &str = "https://api.sulek.dev/releases/MAC63-202307041149-55201637/messages";
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+// Anything longer is not a Habbo packet: the stream is encrypted or out of step.
+const MAX_PACKET_LENGTH: usize = 1024 * 1024;
+
+/// Message names for both directions, keyed by header.
+#[derive(Debug, Default)]
+pub struct PacketNames {
+    incoming: HashMap<u16, String>,
+    outgoing: HashMap<u16, String>,
 }
-#[derive(Debug, Clone)]
-pub struct PacketHandler<'a> {
-    out_stream: &'a Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
-    direction: &'static str,
-}
 
-impl PacketHandler<'_> {
-    pub fn new<'a>(
-        out_stream: &'a Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
-        direction: &'static str,
-    ) -> PacketHandler<'a> {
-        PacketHandler {
-            out_stream,
-            direction,
-        }
+impl PacketNames {
+    pub async fn fetch() -> Result<Self, String> {
+        let client = reqwest::Client::builder()
+            .timeout(FETCH_TIMEOUT)
+            .build()
+            .map_err(|e| e.to_string())?;
+        let response = client
+            .get(PACKETS_URL)
+            .send()
+            .await
+            .and_then(|response| response.error_for_status())
+            .map_err(|e| e.to_string())?;
+        let json = response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|e| e.to_string())?;
+        Self::from_json(&json)
     }
 
-    pub async fn forward(&mut self, buf: &[u8]) {
-        let mut out_stream = self.out_stream.lock().await;
-        out_stream.write_all(buf).await.unwrap();
-        out_stream.flush().await.unwrap();
-        // ConsoleLogger::info(format!("Packet: {}", String::from_utf8_lossy(buf)));
-        self.process(&mut buf.to_vec()).await;
-    }
-
-    pub fn extract_packet(&self, buffer: &mut Vec<u8>) -> Vec<Packet> {
-        // Check if the buffer has enough data for a complete packet via the first 4 bytes which should give length
-        if buffer.len() < 6 {
-            return Vec::new();
-        }
-
-        // get the packet length from the first 4 bytes
-        let mut packet = Packet::new(Some(buffer.to_vec()), None, None, "Outgoing");
-        let packet_length = packet.read_length() as usize;
-
-        // but does the packet length it told us match the actual length of the buffer?
-        if buffer.len() < packet_length {
-            return Vec::new();
-        }
-
-        // get header and body from packet
-        let packet_header = &buffer[4..6];
-        let _packet_body = buffer[6..packet_length].to_vec();
-        let header_value = u16::from_be_bytes([packet_header[0], packet_header[1]]);
-        // take the processed packet out of the buffer
-        buffer.drain(0..packet_length);
-
-        return Vec::new();
-    }
-
-    async fn get_packet_info(mut packet: Packet) -> Packet {
-        let packet_header = packet.get_header();
-        let packet_info = {
-            let collection_lock = PACKET_COLLECTION.lock().await;
-            collection_lock
+    pub fn from_json(json: &serde_json::Value) -> Result<Self, String> {
+        let list = |direction: &str| -> Result<HashMap<u16, String>, String> {
+            let messages = json
+                .get("messages")
+                .and_then(|messages| messages.get(direction))
+                .and_then(|messages| messages.as_array())
+                .ok_or_else(|| format!("The response has no {direction} message list"))?;
+            Ok(messages
                 .iter()
-                .find(|packet_info| packet_info.header == Some(packet_header))
-                .cloned()
+                .filter_map(|message| {
+                    let header = u16::try_from(message.get("id")?.as_u64()?).ok()?;
+                    let name = message.get("name")?.as_str()?;
+                    Some((header, name.to_owned()))
+                })
+                .collect())
         };
-        let packet_info = match packet_info {
-            Some(info) => info,
-            None => packet.clone(),
-        };
-        let packet_name = packet_info.name.clone();
-
-        packet.name = packet_name;
-
-        packet
+        Ok(PacketNames {
+            incoming: list("incoming")?,
+            outgoing: list("outgoing")?,
+        })
     }
 
-    async fn process(&mut self, buffer: &mut Vec<u8>) {
-        let direction_ref = &self.direction;
-        if buffer.len() < 6 || direction_ref == &"Out" {
-            return ();
+    pub fn get(&self, direction: Direction, header: u16) -> Option<&str> {
+        let names = match direction {
+            Direction::ClientToServer => &self.outgoing,
+            Direction::ServerToClient => &self.incoming,
+        };
+        names.get(&header).map(String::as_str)
+    }
+
+    pub fn count(&self) -> usize {
+        self.incoming.len() + self.outgoing.len()
+    }
+}
+
+/// Reassembles one direction's TCP chunks into Habbo packets: a 4-byte
+/// big-endian length, then a 2-byte header and the body. TCP can split a
+/// packet across reads or put several in one read, so partial data waits for
+/// the next chunk.
+#[derive(Debug)]
+pub struct PacketHandler {
+    direction: Direction,
+    buffer: Vec<u8>,
+    desynced: bool,
+}
+
+impl PacketHandler {
+    pub fn new(direction: Direction) -> Self {
+        PacketHandler {
+            direction,
+            buffer: Vec::new(),
+            desynced: false,
         }
+    }
 
-        let mut constructor_packet = Packet::new(Some(buffer.to_vec()), None, None, direction_ref);
+    /// Forgets partial data, for a new connection.
+    pub fn reset(&mut self) {
+        self.buffer.clear();
+        self.desynced = false;
+    }
 
-        let mut packets_collection: Vec<Packet> = Vec::new();
+    /// True once a length prefix was impossible. Habbo encrypts client to
+    /// server traffic after the handshake, so it stops parsing there.
+    pub fn is_desynced(&self) -> bool {
+        self.desynced
+    }
 
-        while constructor_packet.total_bytes() >= 4
-            && constructor_packet.total_bytes() - 4 >= constructor_packet.read_length() as usize
-        {
-            let mut new_packet = Packet::new(
-                Some(Self::copy_with_padding(
-                    &buffer,
-                    0,
-                    constructor_packet.read_length() as usize + 4,
-                )),
+    /// Appends a TCP chunk and returns every packet it completes.
+    pub fn push(&mut self, chunk: &[u8], names: &PacketNames) -> Vec<Packet> {
+        let mut packets = Vec::new();
+        if self.desynced {
+            return packets;
+        }
+        self.buffer.extend_from_slice(chunk);
+        let mut offset = 0;
+        while self.buffer.len() - offset >= 4 {
+            let length_bytes = [
+                self.buffer[offset],
+                self.buffer[offset + 1],
+                self.buffer[offset + 2],
+                self.buffer[offset + 3],
+            ];
+            let length = u32::from_be_bytes(length_bytes) as usize;
+            if !(2..=MAX_PACKET_LENGTH).contains(&length) {
+                self.desynced = true;
+                self.buffer = Vec::new();
+                return packets;
+            }
+            let end = offset + 4 + length;
+            if self.buffer.len() < end {
+                break;
+            }
+            let mut packet = Packet::new(
+                Some(self.buffer[offset..end].to_vec()),
                 None,
                 None,
-                direction_ref,
+                self.direction,
             );
-
-            //advance the buffer to the next packet
-            new_packet = Self::get_packet_info(new_packet).await;
-            let packet_clone = new_packet.clone();
-            packets_collection.push(new_packet);
-            *buffer = Self::copy_with_padding(
-                &buffer,
-                constructor_packet.read_length() as usize + 4,
-                buffer.len(),
-            );
-            constructor_packet = Packet::new(Some(buffer.to_vec()), None, None, direction_ref);
-            tokio::spawn(async move { Self::process_packet(packet_clone) }).await;
+            let header = packet.get_header();
+            packet.header = Some(header);
+            packet.name = names.get(self.direction, header).map(str::to_owned);
+            packets.push(packet);
+            offset = end;
         }
+        self.buffer.drain(..offset);
+        packets
     }
 
     pub fn process_packet(mut packet: Packet) {
-        // let packet_name = packet.name.clone().unwrap();
-        // let packet_header = packet.get_header();
         let packet_body = packet.get_body();
-        // let packet_direction = packet.direction.clone();
 
         ConsoleLogger::log_packet::<Packet>(packet, &packet_body);
     }
+}
 
-    pub fn copy_with_padding(original: &[u8], from: usize, to: usize) -> Vec<u8> {
-        let length = original.len();
-        let padding = if to > length { to - length } else { 0 };
-        let padded_to = to + padding;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        let mut result = Vec::with_capacity(padded_to - from);
-        result.extend_from_slice(&original[from..to]);
-
-        if padding > 0 {
-            result.extend(vec![0; padding]);
-        }
-
-        result
+    fn frame(header: u16, body: &[u8]) -> Vec<u8> {
+        let mut bytes = ((body.len() + 2) as u32).to_be_bytes().to_vec();
+        bytes.extend_from_slice(&header.to_be_bytes());
+        bytes.extend_from_slice(body);
+        bytes
     }
 
-    pub async fn fetch_packets() {
-        let url = "https://api.sulek.dev/releases/MAC63-202307041149-55201637/messages";
-        let response = reqwest::get(url)
-            .await
-            .expect("Failed to fetch packets")
-            .json::<serde_json::Value>()
-            .await
-            .expect("Failed to parse JSON");
+    fn names() -> PacketNames {
+        PacketNames::from_json(&serde_json::json!({
+            "messages": {
+                "incoming": [{ "id": 7, "name": "ChatEvent" }],
+                "outgoing": [{ "id": 7, "name": "ChatComposer" }]
+            }
+        }))
+        .unwrap()
+    }
 
-        let response_packets = response
-            .get("messages")
-            .and_then(|messages| messages.get("incoming"))
-            .and_then(|incoming| incoming.as_array())
-            .expect("Failed to get incoming packets");
-        for packet in response_packets {
-            let name = packet
-                .get("name")
-                .and_then(|name| name.as_str())
-                .expect("Failed to get packet name")
-                .to_owned();
-            let header = packet
-                .get("id")
-                .and_then(|header| header.as_u64())
-                .expect("Failed to get packet header") as u16;
+    #[test]
+    fn reassembles_a_packet_split_across_chunks() {
+        let names = names();
+        let mut handler = PacketHandler::new(Direction::ServerToClient);
+        let bytes = frame(7, b"hello");
+        assert!(handler.push(&bytes[..3], &names).is_empty());
+        assert!(handler.push(&bytes[3..8], &names).is_empty());
+        let mut packets = handler.push(&bytes[8..], &names);
+        assert_eq!(packets.len(), 1);
+        let mut packet = packets.remove(0);
+        assert_eq!(packet.header, Some(7));
+        assert_eq!(packet.name.as_deref(), Some("ChatEvent"));
+        assert_eq!(packet.get_body(), b"hello");
+    }
 
-            let packet = Packet::new(None, Some(name), Some(header), "Out");
-            PACKET_COLLECTION.lock().await.push(packet);
-        }
+    #[test]
+    fn splits_several_packets_in_one_chunk_and_keeps_the_remainder() {
+        let names = names();
+        let mut handler = PacketHandler::new(Direction::ClientToServer);
+        let mut bytes = frame(7, b"a");
+        bytes.extend(frame(9, b""));
+        let third = frame(7, b"later");
+        bytes.extend_from_slice(&third[..5]);
+        let packets = handler.push(&bytes, &names);
+        assert_eq!(packets.len(), 2);
+        assert_eq!(packets[0].name.as_deref(), Some("ChatComposer"));
+        assert_eq!(packets[1].header, Some(9));
+        assert_eq!(packets[1].name, None);
+        let packets = handler.push(&third[5..], &names);
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].header, Some(7));
+    }
+
+    #[test]
+    fn stops_parsing_after_an_impossible_length_until_reset() {
+        let names = names();
+        let mut handler = PacketHandler::new(Direction::ClientToServer);
+        assert!(handler
+            .push(&[0xde, 0xad, 0xbe, 0xef, 1, 2], &names)
+            .is_empty());
+        assert!(handler.is_desynced());
+        assert!(handler.push(&frame(7, b"x"), &names).is_empty());
+        handler.reset();
+        assert!(!handler.is_desynced());
+        assert_eq!(handler.push(&frame(7, b"x"), &names).len(), 1);
+    }
+
+    #[test]
+    fn reads_names_for_both_directions() {
+        let names = names();
+        assert_eq!(names.count(), 2);
+        assert_eq!(names.get(Direction::ServerToClient, 7), Some("ChatEvent"));
+        assert_eq!(
+            names.get(Direction::ClientToServer, 7),
+            Some("ChatComposer")
+        );
+        assert_eq!(names.get(Direction::ClientToServer, 8), None);
     }
 }
