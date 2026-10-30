@@ -23,6 +23,26 @@ Under WSL, Hablog runs as a Linux program but still does all of the above. Throu
 
 On macOS and other Linux systems Hablog prepares everything and tells you which file to start on Windows.
 
+## The window
+Hablog also has a window, made with [Tauri](https://tauri.app). It does the same as the command line and shares its `hablog.toml`, `logs/` and `automation/`:
+
+* **Connection**: start and stop, what was found, traffic counters, the observer (with a button to set it up), and what Hablog is doing.
+* **Packets**: the log, one row per message with its header and ID. Filter by direction, by header (`@C 3` shows only those, `!@G` hides one) or by text, pause it, and select a message to see it in full, its values decoded and a hex dump. Raw traffic is a toggle.
+* **Builder**: `hablog build` and `hablog decode` as a form, with a live preview. Double-click a message in the log to open it here.
+* **Settings**: `hablog.toml` as a form. Saving keeps the file's comments.
+
+![The Packets tab, showing a made-up session](docs/images/window-packets.png)
+
+It needs [Node.js](https://nodejs.org) and [Tauri's prerequisites](https://tauri.app/start/prerequisites/) (on Windows, that's the WebView2 runtime, which Windows 10 and 11 already have). Then:
+
+```bash
+cd gui
+npm install
+npm run tauri dev
+```
+
+`npm run tauri build` builds `target/release/hablog-gui`; run it from inside the repository so it finds `automation/`. `npm run dev` alone shows the window in a browser at http://localhost:1420 with a made-up session, for working on the window without the game.
+
 ## Settings
 The first run creates `hablog.toml` next to where you run Hablog, with every setting explained. The defaults are the automatic behavior above, so you only need it to change something:
 
@@ -124,8 +144,10 @@ A row is a TCP read, not necessarily one complete message.
 * The relay only listens on loopback, and refuses a game server that resolves to the relay itself.
 
 ## Project Structure
-* `main.rs`: The commands, starting the game, and the console log and captures.
-* `settings.rs`: `hablog.toml` and its documented template.
+* `main.rs`: The commands and the console.
+* `session.rs`: A session from start to finish (discovery, the relay, the observer, starting the game, captures), told to the console or the window as a stream of events.
+* `tools.rs`: `hablog details`, `decode` and `build`.
+* `settings.rs`: `hablog.toml`, its documented template, and saving it with its comments kept.
 * `proxy.rs`: The relay.
 * `capture.rs`: Writes the JSONL capture files.
 * `logger.rs`: Console output.
@@ -136,6 +158,7 @@ A row is a TCP read, not necessarily one complete message.
 * `origins/observer.rs`: Runs the observer in `automation/` and reads its events.
 * `origins/crypto.rs`: The session decoder used by `hablog decrypt`.
 * `origins/fuse.rs`: Splits traffic into FUSE messages, reads and writes VL64 and B64, and masks the login password.
+* `gui/`: The window. `src-tauri/` is its Rust side, a thin layer of commands over the library; `src/` is the page, plain TypeScript built with Vite.
 
 ## Tests
 
@@ -147,7 +170,11 @@ cargo test
 cd automation && npm test
 ```
 
-The Rust tests cover the relay over loopback (exact forwarding both ways, half-closes, reconnects, a second connection, shutdown, the self-connection check and a full log queue), discovery and routing against fixture installations, the settings template, the crypto test vectors, and the observer protocol against a stand-in companion (skipped without Node.js). The observer's own tests run its agent against simulated memory.
+```bash
+cd gui && npm run build
+```
+
+The Rust tests cover the relay over loopback (exact forwarding both ways, half-closes, reconnects, a second connection, shutdown, the self-connection check and a full log queue), discovery and routing against fixture installations, the settings template, the crypto test vectors, and the observer protocol against a stand-in companion (skipped without Node.js). The observer's own tests run its agent against simulated memory. `npm run build` in `gui/` type-checks the window.
 
 # Demos of the original Habbo version
 

@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+members = ["gui/src-tauri"]
 
 [package]
 name = "hablog"
@@ -14,6 +15,7 @@ hex = "0.4.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.100"
 toml = { version = "0.8", default-features = false, features = ["parse"] }
+toml_edit = "0.22"
 termcolor = "1.2.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 base64 = "0.22.1"

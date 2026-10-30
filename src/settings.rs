@@ -1,7 +1,7 @@
 //! `hablog.toml`. Hablog writes this template on first run, so every setting
 //! is documented where it is changed. A missing setting keeps its default.
 use crate::model::Direction;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -54,7 +54,7 @@ captures_folder = "logs"
 #observer = 'automation'
 "#;
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub hotel: String,
@@ -67,7 +67,7 @@ pub struct Settings {
     pub advanced: Advanced,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Advanced {
     pub upstream: Option<String>,
@@ -76,7 +76,7 @@ pub struct Advanced {
     pub observer: Option<PathBuf>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Show {
     Both,
@@ -138,6 +138,54 @@ impl Settings {
         }
     }
 
+    /// Writes these settings to `path`, keeping its comments and layout. A
+    /// missing file starts from the documented template.
+    pub fn save(&self, path: &Path) -> Result<(), String> {
+        use toml_edit::{value, DocumentMut, Item, Table};
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => TEMPLATE.into(),
+            Err(e) => return Err(format!("Cannot read {}: {e}", path.display())),
+        };
+        let mut document: DocumentMut = text
+            .parse()
+            .map_err(|e| format!("{} is not valid: {e}", path.display()))?;
+        let show = match self.show {
+            Show::Both => "both",
+            Show::In => "in",
+            Show::Out => "out",
+            Show::None => "none",
+        };
+        document["hotel"] = value(self.hotel.as_str());
+        document["launch"] = value(self.launch);
+        document["decrypt"] = value(self.decrypt);
+        document["show"] = value(show);
+        document["show_raw"] = value(self.show_raw);
+        document["save_captures"] = value(self.save_captures);
+        document["captures_folder"] = value(self.captures_folder.display().to_string());
+        let advanced = [
+            ("upstream", self.advanced.upstream.clone()),
+            ("appdata", path_text(&self.advanced.appdata)),
+            ("local_appdata", path_text(&self.advanced.local_appdata)),
+            ("observer", path_text(&self.advanced.observer)),
+        ];
+        if !document.contains_key("advanced") && advanced.iter().any(|(_, v)| v.is_some()) {
+            document["advanced"] = Item::Table(Table::new());
+        }
+        if let Some(table) = document.get_mut("advanced").and_then(Item::as_table_mut) {
+            for (key, setting) in advanced {
+                match setting {
+                    Some(setting) => table[key] = value(setting),
+                    None => {
+                        table.remove(key);
+                    }
+                }
+            }
+        }
+        fs::write(path, document.to_string())
+            .map_err(|e| format!("Cannot write {}: {e}", path.display()))
+    }
+
     pub fn parse(text: &str) -> Result<Self, String> {
         toml::from_str(text).map_err(|e| e.to_string())
     }
@@ -159,6 +207,10 @@ impl Settings {
     pub fn captures(&self) -> Option<&Path> {
         self.save_captures.then_some(self.captures_folder.as_path())
     }
+}
+
+fn path_text(path: &Option<PathBuf>) -> Option<String> {
+    path.as_ref().map(|path| path.display().to_string())
 }
 
 #[cfg(test)]
@@ -213,6 +265,46 @@ mod tests {
             .contains("lunch"));
         assert!(Settings::parse("show = \"everything\"").is_err());
         assert!(Settings::parse("[advanced]\nupstraem = \"x\"").is_err());
+    }
+
+    #[test]
+    fn saving_keeps_the_comments_and_round_trips() {
+        let dir = std::env::temp_dir().join(format!(
+            "hablog-settings-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(FILE_NAME);
+        let settings = Settings {
+            hotel: "hhobr".into(),
+            show: Show::In,
+            advanced: Advanced {
+                upstream: Some("127.0.0.1:1".into()),
+                ..Advanced::default()
+            },
+            ..Settings::default()
+        };
+        settings.save(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# Which Origins hotel to play on."));
+        assert!(text.contains("hotel = \"hhobr\""));
+        assert!(
+            text.contains("#appdata = 'C:"),
+            "unused examples stay commented"
+        );
+        assert_eq!(Settings::load(&path).unwrap(), settings);
+
+        // An older file without newer settings, and an advanced value removed.
+        fs::write(&path, "launch = false\n\n[advanced]\nupstream = \"x:1\"\n").unwrap();
+        let mut settings = Settings::load(&path).unwrap();
+        settings.show_raw = true;
+        settings.advanced.upstream = None;
+        settings.save(&path).unwrap();
+        let saved = Settings::load(&path).unwrap();
+        assert!(saved.show_raw && !saved.launch);
+        assert_eq!(saved.advanced.upstream, None);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
