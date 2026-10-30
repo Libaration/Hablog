@@ -2,7 +2,8 @@
 //! A message starts with a two-character header such as `@D`, and numbers
 //! such as lengths are written in "Base64" characters (`@` to `\x7f`), 6 bits
 //! each. The server ends each message with `\x01`; the client prefixes each
-//! with its length in three such characters.
+//! with its length in three such characters. Server messages are returned with
+//! their `\x01`, so what is shown is exactly what was sent.
 //!
 //! Before encryption starts, these messages travel on the wire as they are.
 //! Afterwards the wire carries standard Base64 ciphertext, which never
@@ -17,8 +18,8 @@ const END: u8 = 1;
 pub fn split_payload(direction: Direction, payload: &[u8]) -> Vec<&[u8]> {
     match direction {
         Direction::ServerToClient => payload
-            .split(|&byte| byte == END)
-            .filter(|message| !message.is_empty())
+            .split_inclusive(|&byte| byte == END)
+            .filter(|message| *message != [END])
             .collect(),
         Direction::ClientToServer => vec![payload],
     }
@@ -65,6 +66,60 @@ fn number(bytes: &[u8], digits: usize) -> Option<(usize, &[u8])> {
                 .then(|| (value << 6) | usize::from(digit & 0x3f))
         })
         .map(|value| (value, rest))
+}
+
+/// Reads a B64 number of `digits` characters, e.g. `@J` = 10 or `CN` = 206.
+pub fn b64(bytes: &[u8], digits: usize) -> Option<(usize, &[u8])> {
+    number(bytes, digits)
+}
+
+/// Writes `value` as a B64 number of `digits` characters, if it fits.
+pub fn b64_encode(value: usize, digits: usize) -> Option<Vec<u8>> {
+    if digits == 0 || value >> (6 * digits) != 0 {
+        return None;
+    }
+    Some(
+        (0..digits)
+            .rev()
+            .map(|digit| 64 | ((value >> (6 * digit)) & 0x3f) as u8)
+            .collect(),
+    )
+}
+
+/// Reads one VL64 number from the start of `bytes`. The first character
+/// holds how many characters the number uses (bits 3-5), its sign (bit 2)
+/// and its lowest 2 bits; each further character adds 6 bits.
+pub fn vl64(bytes: &[u8]) -> Option<(i32, &[u8])> {
+    let first = *bytes.first()?;
+    if !(64..128).contains(&first) {
+        return None;
+    }
+    let count = usize::from((first >> 3) & 7);
+    if !(1..=6).contains(&count) || bytes.len() < count {
+        return None;
+    }
+    let mut value = i64::from(first & 3);
+    for (index, &byte) in bytes[1..count].iter().enumerate() {
+        if !(64..128).contains(&byte) {
+            return None;
+        }
+        value |= i64::from(byte & 0x3f) << (2 + 6 * index);
+    }
+    let value = if first & 4 != 0 { -value } else { value };
+    Some((i32::try_from(value).ok()?, &bytes[count..]))
+}
+
+/// Writes `value` as VL64, e.g. 0 = `H`, 8 = `PB`, -1 = `M`.
+pub fn vl64_encode(value: i32) -> Vec<u8> {
+    let mut rest = value.unsigned_abs();
+    let mut bytes = vec![64 | (rest & 3) as u8];
+    rest >>= 2;
+    while rest != 0 {
+        bytes.push(64 | (rest & 0x3f) as u8);
+        rest >>= 6;
+    }
+    bytes[0] |= ((bytes.len() as u8) << 3) | if value < 0 { 4 } else { 0 };
+    bytes
 }
 
 /// A copy of a decrypted client message with the login password replaced by
@@ -124,7 +179,7 @@ mod tests {
         // Seen at the start of a real session, before encryption.
         assert_eq!(
             plain_messages(Direction::ServerToClient, b"@@\x01"),
-            Some(vec![&b"@@"[..]])
+            Some(vec![&b"@@\x01"[..]])
         );
         assert_eq!(
             plain_messages(Direction::ClientToServer, b"@@BCN"),
@@ -133,7 +188,7 @@ mod tests {
         assert_eq!(id(b"CN"), Some(206));
         assert_eq!(
             plain_messages(Direction::ServerToClient, b"DU5742\x02\x01@A12\x01"),
-            Some(vec![&b"DU5742\x02"[..], &b"@A12"[..]])
+            Some(vec![&b"DU5742\x02\x01"[..], &b"@A12\x01"[..]])
         );
         assert_eq!(
             plain_messages(Direction::ClientToServer, b"@@BCN@@D@A12"),
@@ -166,11 +221,16 @@ mod tests {
     fn splits_server_payloads_on_the_end_marker() {
         assert_eq!(
             split_payload(Direction::ServerToClient, b"@CIHH\x01"),
-            vec![&b"@CIHH"[..]]
+            vec![&b"@CIHH\x01"[..]]
         );
         assert_eq!(
             split_payload(Direction::ServerToClient, b"@Ba\x01@Cb\x01"),
-            vec![&b"@Ba"[..], &b"@Cb"[..]]
+            vec![&b"@Ba\x01"[..], &b"@Cb\x01"[..]]
+        );
+        // A message cut off without its end marker is still shown.
+        assert_eq!(
+            split_payload(Direction::ServerToClient, b"@Ba\x01\x01@Cb"),
+            vec![&b"@Ba\x01"[..], &b"@Cb"[..]]
         );
         assert_eq!(
             split_payload(Direction::ClientToServer, b"@Ka\x01b"),
@@ -179,6 +239,61 @@ mod tests {
         assert_eq!(id(b"@Z@Jclub_habbo"), Some(26));
         assert_eq!(id(b"\x7f@"), Some(4032));
         assert_eq!(id(b"1x"), None);
+    }
+
+    #[test]
+    fn vl64_matches_values_seen_in_real_sessions() {
+        // From a decrypted session: the 8 rights, then the 6 session parameters.
+        assert_eq!(vl64(b"PBfuse_login"), Some((8, &b"fuse_login"[..])));
+        let mut rest = &b"RAHHIIKHJHPAIQAdd-MM-yyyy"[..];
+        let mut values = Vec::new();
+        while let Some((value, after)) = vl64(rest) {
+            values.push(value);
+            rest = after;
+        }
+        assert_eq!(values, [6, 0, 0, 1, 1, 3, 0, 2, 0, 4, 1, 5]);
+        assert_eq!(rest, b"dd-MM-yyyy");
+        assert_eq!(vl64(b"M"), Some((-1, &b""[..])));
+        // A first character with no length, or a cut-off number.
+        assert_eq!(vl64(b"@J"), None);
+        assert_eq!(vl64(b"P"), None);
+        assert_eq!(vl64(b"P-"), None);
+    }
+
+    #[test]
+    fn vl64_round_trips() {
+        assert_eq!(vl64_encode(0), b"H");
+        assert_eq!(vl64_encode(8), b"PB");
+        assert_eq!(vl64_encode(-1), b"M");
+        for value in [
+            0,
+            1,
+            3,
+            4,
+            63,
+            64,
+            255,
+            256,
+            4095,
+            70_000,
+            1 << 20,
+            i32::MAX,
+            -5,
+            -70_000,
+            i32::MIN + 1,
+        ] {
+            let encoded = vl64_encode(value);
+            assert_eq!(vl64(&encoded), Some((value, &b""[..])), "{value}");
+        }
+    }
+
+    #[test]
+    fn b64_round_trips_and_refuses_what_does_not_fit() {
+        assert_eq!(b64_encode(206, 2).unwrap(), b"CN");
+        assert_eq!(b64_encode(10, 2).unwrap(), b"@J");
+        assert_eq!(b64_encode(139, 3).unwrap(), b"@BK");
+        assert_eq!(b64_encode(4096, 2), None);
+        assert_eq!(b64(b"@BK", 3), Some((139, &b""[..])));
     }
 
     #[test]

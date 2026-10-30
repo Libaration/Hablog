@@ -1,6 +1,6 @@
 use chrono::Local;
 use hablog::capture::CaptureWriter;
-use hablog::logger::{readable, ConsoleLogger};
+use hablog::logger::{from_readable, readable, ConsoleLogger};
 use hablog::model::Direction;
 use hablog::origins::crypto::{self, OriginsSession, StreamKind};
 use hablog::origins::discovery::{self, DiscoverySnapshot, ObservedEndpoint};
@@ -25,6 +25,8 @@ Hablog relays Habbo Origins through your computer and logs its traffic.
                    routes it through the relay, starts the game and logs its
                    traffic until the game closes or you press Ctrl+C.
   hablog details   Show the installed client's connection details.
+  hablog decode    Turn VL64 and B64 values from the log into numbers, and
+                   numbers into them: `hablog decode PB`, `hablog decode 206`.
   hablog decrypt   Decrypt a captured message with your session key.
 
 Settings are in hablog.toml, which Hablog creates with an explanation of every
@@ -38,7 +40,12 @@ const EVENT_BATCH: usize = 256;
 async fn main() {
     let mut args = std::env::args().skip(1);
     let command = args.next();
-    if args.next().is_some() {
+    let rest: Vec<String> = args.collect();
+    if command.as_deref() == Some("decode") {
+        decode_command(&rest.join(" "));
+        return;
+    }
+    if !rest.is_empty() {
         usage_error("Hablog takes no options; settings are in hablog.toml.");
     }
     match command.as_deref() {
@@ -730,6 +737,101 @@ fn endpoint_text(endpoint: Option<&ObservedEndpoint>) -> String {
     )
 }
 
+/// Decodes `value`, or each value typed at the prompt when it is empty.
+fn decode_command(value: &str) {
+    if !value.is_empty() {
+        for line in decode(value) {
+            println!("{line}");
+        }
+        return;
+    }
+    println!("Paste a value from the log, or type a number. Press Enter on an empty line to quit.");
+    while let Some(value) = ask("Value", "").filter(|value| !value.is_empty()) {
+        for line in decode(&value) {
+            println!("  {line}");
+        }
+    }
+}
+
+/// What `value` means as FUSE numbers. A number is encoded instead.
+fn decode(value: &str) -> Vec<String> {
+    let value = value.trim();
+    if let Ok(number) = value.parse::<i32>() {
+        let mut lines = vec![format!(
+            "VL64: {}",
+            readable(&fuse::vl64_encode(number), usize::MAX)
+        )];
+        let b64: Vec<String> = usize::try_from(number)
+            .ok()
+            .into_iter()
+            .flat_map(|number| {
+                [
+                    (2, "a header or string length"),
+                    (3, "a client message length"),
+                ]
+                .into_iter()
+                .filter_map(move |(digits, use_)| {
+                    let encoded = fuse::b64_encode(number, digits)?;
+                    Some(format!("{} ({use_})", readable(&encoded, usize::MAX)))
+                })
+            })
+            .collect();
+        lines.push(if b64.is_empty() {
+            "B64:  doesn't fit".into()
+        } else {
+            format!("B64:  {}", b64.join(", "))
+        });
+        return lines;
+    }
+
+    let bytes = from_readable(value);
+    let mut lines = Vec::new();
+    // VL64 numbers usually come one after another; reading stops at the
+    // first byte that can't be part of one, such as a [2]. Lowercase letters
+    // are valid VL64 too, but four or more in a row are a word, not a number.
+    let mut rest = &bytes[..];
+    let mut numbers = Vec::new();
+    while let Some((number, after)) = fuse::vl64(rest) {
+        let used = &rest[..rest.len() - after.len()];
+        if used.len() >= 4 && used.iter().all(|&b| b.is_ascii_lowercase() || b == b'_') {
+            break;
+        }
+        numbers.push(format!("{} = {number}", readable(used, usize::MAX)));
+        rest = after;
+    }
+    lines.push(match (numbers.is_empty(), rest.is_empty()) {
+        (true, _) => "VL64: not a VL64 number".into(),
+        (false, true) => format!("VL64: {}", numbers.join(", ")),
+        (false, false) => format!(
+            "VL64: {}, then {}",
+            numbers.join(", "),
+            readable(rest, usize::MAX)
+        ),
+    });
+    lines.push(match bytes.len() {
+        2 | 3 => match fuse::b64(&bytes, bytes.len()) {
+            Some((number, _)) => format!("B64:  {number}"),
+            None => "B64:  not a B64 number".into(),
+        },
+        // A client string: its length in two B64 characters, then the text.
+        _ => match fuse::b64(&bytes, 2).filter(|(length, after)| *length <= after.len()) {
+            Some((length, after)) if bytes.len() > 3 => {
+                let text = readable(&after[..length], usize::MAX);
+                if after.len() == length {
+                    format!("B64:  a {length}-character string: {text}")
+                } else {
+                    format!(
+                        "B64:  a {length}-character string: {text}, then {}",
+                        readable(&after[length..], usize::MAX)
+                    )
+                }
+            }
+            _ => "B64:  not a B64 number or string".into(),
+        },
+    });
+    lines
+}
+
 /// Asks for each value, remembering the previous answers as defaults.
 fn decrypt_command() {
     let key = match std::fs::read_to_string(SESSION_KEY_FILE) {
@@ -838,4 +940,39 @@ fn confirm(question: &str) -> bool {
         answer.trim().to_ascii_lowercase().as_str(),
         "" | "y" | "yes"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_values_pasted_from_the_log() {
+        assert_eq!(decode("PB"), ["VL64: PB = 8", "B64:  1026"]);
+        assert_eq!(
+            decode("PBfuse_login[2]fuse_trade[2]")[0],
+            "VL64: PB = 8, then fuse_login[2]fuse_trade[2]"
+        );
+        assert_eq!(
+            decode("RAHHIIKHJHPAIQAdd-MM-yyyy[2][1]")[0],
+            "VL64: RA = 6, H = 0, H = 0, I = 1, I = 1, K = 3, H = 0, J = 2, H = 0, PA = 4, I = 1, QA = 5, then dd-MM-yyyy[2][1]"
+        );
+        assert_eq!(decode("CN"), ["VL64: not a VL64 number", "B64:  206"]);
+        assert_eq!(
+            decode("@Jclub_habbo")[1],
+            "B64:  a 10-character string: club_habbo"
+        );
+    }
+
+    #[test]
+    fn encodes_numbers() {
+        assert_eq!(
+            decode("206"),
+            [
+                "VL64: Rs",
+                "B64:  CN (a header or string length), @CN (a client message length)"
+            ]
+        );
+        assert_eq!(decode("-1"), ["VL64: M", "B64:  doesn't fit"]);
+    }
 }

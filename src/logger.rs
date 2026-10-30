@@ -200,6 +200,31 @@ pub fn readable(bytes: &[u8], limit: usize) -> String {
     result
 }
 
+/// The reverse of `readable`: `[n]` becomes byte n, the rest is taken as is.
+pub fn from_readable(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('[') {
+        bytes.extend_from_slice(&rest.as_bytes()[..start]);
+        let after = &rest[start + 1..];
+        match after
+            .find(']')
+            .and_then(|end| Some((after[..end].parse::<u8>().ok()?, end)))
+        {
+            Some((byte, end)) => {
+                bytes.push(byte);
+                rest = &after[end + 1..];
+            }
+            None => {
+                bytes.push(b'[');
+                rest = after;
+            }
+        }
+    }
+    bytes.extend_from_slice(rest.as_bytes());
+    bytes
+}
+
 /// `readable`, with the `[n]` bytes dimmed so the text stands out.
 fn write_readable(buffer: &mut Buffer, bytes: &[u8], limit: usize) {
     let mut dim = ColorSpec::new();
@@ -232,6 +257,13 @@ mod tests {
             "fuse_login[2]@[127][233]"
         );
         assert_eq!(readable(&[b'a'; 10], 4), "aaaa … 6 more bytes");
+    }
+
+    #[test]
+    fn reads_back_what_it_shows() {
+        let bytes = b"@BPBfuse_login\x02[_D\x01";
+        assert_eq!(from_readable(&readable(bytes, usize::MAX)), bytes);
+        assert_eq!(from_readable("a[256]b[x][2"), b"a[256]b[x][2");
     }
 
     #[test]

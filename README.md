@@ -39,12 +39,14 @@ The first run creates `hablog.toml` next to where you run Hablog, with every set
 `[advanced]` has settings you normally don't need: a different game server, AppData folders elsewhere (such as a Wine prefix), and the observer's folder. A typo in the file is reported instead of being ignored.
 
 ## Reading the log
-Each game message is one line: direction, its two-character header, the header's numeric ID, then the body. Bytes that can't be printed show as `[n]`, like the `[2]` that ends a string:
+Each game message is one line: direction, its two-character header, the header's numeric ID, then the body. Bytes that can't be printed show as `[n]`: `[2]` ends a string and `[1]` ends a server message. Header and body together are exactly what was sent:
 
 ```
-18:15:02.114  IN  @B    2  PBfuse_login[2]fuse_buy_credits[2]fuse_trade[2]
+18:15:02.114  IN  @B    2  PBfuse_login[2]fuse_buy_credits[2]fuse_trade[2][1]
 18:15:02.120 OUT  @Z   26  @Jclub_habbo
 ```
+
+Client and server use separate header sets, so `IN @D` and `OUT @D` are unrelated messages. Numbers in a body are written in VL64 (server bodies mostly: `PB` above is 8) or as B64 lengths (client strings: `@J` is 10, then the 10 characters `club_habbo`); `hablog decode` reads and writes both.
 
 The first messages of a session, the key exchange, travel unencrypted and always show this way. Everything after that is encrypted, and needs the observer to be read.
 
@@ -64,6 +66,23 @@ cargo run --release -- details
 ```
 
 Shows what Hablog found: the launcher, the installed version, and for each hotel the game and MUS servers built into its client, its site and external variables URLs, and any client that is already running.
+
+```bash
+cargo run --release -- decode PB
+```
+
+Reads VL64 and B64 values, and writes numbers as them. Paste part of a body from the log, `[n]` included, and it shows the numbers it starts with and any B64-length string:
+
+```
+$ hablog decode "RAHHIIKHJHPAIQAdd-MM-yyyy[2][1]"
+VL64: RA = 6, H = 0, H = 0, I = 1, I = 1, K = 3, H = 0, J = 2, H = 0, PA = 4, I = 1, QA = 5, then dd-MM-yyyy[2][1]
+B64:  not a B64 number or string
+$ hablog decode 206
+VL64: Rs
+B64:  CN (a header or string length), @CN (a client message length)
+```
+
+Without a value it keeps asking for more.
 
 ```bash
 cargo run --release -- decrypt
@@ -100,7 +119,7 @@ A row is a TCP read, not necessarily one complete message.
 * `origins/routing.rs`: Writes the routed copy of the client.
 * `origins/observer.rs`: Runs the observer in `automation/` and reads its events.
 * `origins/crypto.rs`: The session decoder used by `hablog decrypt`.
-* `origins/fuse.rs`: Splits traffic into FUSE messages and masks the login password.
+* `origins/fuse.rs`: Splits traffic into FUSE messages, reads and writes VL64 and B64, and masks the login password.
 
 ## Tests
 
