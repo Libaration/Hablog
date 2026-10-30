@@ -11,6 +11,9 @@ use termcolor::{Buffer, BufferWriter, Color, ColorChoice, ColorSpec, WriteColor}
 
 // Pending traffic is written early past this size, even without a flush.
 const MAX_PENDING: usize = 64 * 1024;
+// Message bodies and raw chunks are cut off after this many bytes.
+const BODY_LIMIT: usize = 4096;
+const RAW_LIMIT: usize = 64;
 
 pub struct ConsoleLogger {}
 
@@ -62,36 +65,42 @@ impl ConsoleLogger {
         });
     }
 
-    /// One relayed TCP chunk of (encrypted) game traffic.
-    pub fn log_chunk(direction: Direction, bytes: &[u8]) {
+    /// One game message, as an aligned row: direction, the two-character
+    /// header, its numeric ID, then the body.
+    pub fn log_message(direction: Direction, header: &[u8], id: Option<u16>, body: &[u8]) {
         line(false, |buffer| {
+            direction_column(buffer, direction);
             segment(
                 buffer,
-                format!("[{}]", direction.short()),
-                &bold(direction_color(direction)),
-            );
-            segment(
-                buffer,
-                format!("[wire {} B]", bytes.len()),
+                format!("{:<2}", readable(header, usize::MAX)),
                 &bold(Color::Cyan),
             );
-            let _ = write!(buffer, "[{}]", escaped(bytes, 64));
+            segment(
+                buffer,
+                format!(" {:>4}", id.map(|id| id.to_string()).unwrap_or_default()),
+                &plain(Color::Cyan),
+            );
+            if !body.is_empty() {
+                let _ = write!(buffer, "  ");
+                write_readable(buffer, body, BODY_LIMIT);
+            }
         });
     }
 
-    /// One decrypted operation reported by the observer.
-    pub fn log_decrypted(direction: Direction, kind: &str, sequence: &str, plaintext: &[u8]) {
+    /// Raw traffic, such as an encrypted TCP chunk, kept visually in the background.
+    pub fn log_raw(direction: Direction, label: &str, bytes: &[u8]) {
+        let mut dim = ColorSpec::new();
+        dim.set_dimmed(true);
         line(false, |buffer| {
+            direction_column(buffer, direction);
             segment(
                 buffer,
-                format!("[{}]", direction.short()),
-                &bold(direction_color(direction)),
-            );
-            segment(buffer, format!("[{kind} #{sequence}]"), &bold(Color::Cyan));
-            segment(
-                buffer,
-                format!("[{}]", escaped(plaintext, 4096)),
-                &bold(Color::Green),
+                format!(
+                    "{label:<7}  {}  ({} B)",
+                    readable(bytes, RAW_LIMIT),
+                    bytes.len()
+                ),
+                &dim,
             );
         });
     }
@@ -147,6 +156,20 @@ fn segment(buffer: &mut Buffer, text: impl Display, spec: &ColorSpec) {
     let _ = buffer.reset();
 }
 
+fn direction_column(buffer: &mut Buffer, direction: Direction) {
+    segment(
+        buffer,
+        format!("{:>3}  ", direction.short().to_ascii_uppercase()),
+        &bold(direction_color(direction)),
+    );
+}
+
+fn plain(color: Color) -> ColorSpec {
+    let mut spec = ColorSpec::new();
+    spec.set_fg(Some(color));
+    spec
+}
+
 fn bold(color: Color) -> ColorSpec {
     let mut spec = ColorSpec::new();
     spec.set_bold(true).set_fg(Some(color));
@@ -160,17 +183,15 @@ fn direction_color(direction: Direction) -> Color {
     }
 }
 
-/// Printable ASCII as is, everything else escaped, cut off after `limit` bytes.
-pub fn escaped(bytes: &[u8], limit: usize) -> String {
+/// Printable ASCII as is and any other byte as `[n]`, the way Habbo packet
+/// loggers show them (`[2]` ends a string), cut off after `limit` bytes.
+pub fn readable(bytes: &[u8], limit: usize) -> String {
     let mut result = String::new();
     for &byte in bytes.iter().take(limit) {
-        match byte {
-            b'\n' => result.push_str("\\n"),
-            b'\r' => result.push_str("\\r"),
-            b'\t' => result.push_str("\\t"),
-            b'\\' => result.push_str("\\\\"),
-            32..=126 => result.push(byte as char),
-            _ => result.push_str(&format!("\\x{byte:02x}")),
+        if (32..127).contains(&byte) {
+            result.push(byte as char);
+        } else {
+            result.push_str(&format!("[{byte}]"));
         }
     }
     if bytes.len() > limit {
@@ -179,13 +200,44 @@ pub fn escaped(bytes: &[u8], limit: usize) -> String {
     result
 }
 
+/// `readable`, with the `[n]` bytes dimmed so the text stands out.
+fn write_readable(buffer: &mut Buffer, bytes: &[u8], limit: usize) {
+    let mut dim = ColorSpec::new();
+    dim.set_dimmed(true);
+    let shown = &bytes[..bytes.len().min(limit)];
+    for run in shown.chunk_by(|a, b| (32..127).contains(a) == (32..127).contains(b)) {
+        if (32..127).contains(&run[0]) {
+            let _ = buffer.write_all(run);
+        } else {
+            segment(buffer, readable(run, usize::MAX), &dim);
+        }
+    }
+    if bytes.len() > limit {
+        segment(
+            buffer,
+            format!(" … {} more bytes", bytes.len() - limit),
+            &dim,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn escapes_binary_and_cuts_long_input() {
-        assert_eq!(escaped(b"@B\x01hi\n\\", 64), "@B\\x01hi\\n\\\\");
-        assert_eq!(escaped(&[b'a'; 10], 4), "aaaa … 6 more bytes");
+    fn shows_unprintable_bytes_as_numbers_and_cuts_long_input() {
+        assert_eq!(
+            readable(b"fuse_login\x02@\x7f\xe9", 64),
+            "fuse_login[2]@[127][233]"
+        );
+        assert_eq!(readable(&[b'a'; 10], 4), "aaaa … 6 more bytes");
+    }
+
+    #[test]
+    fn dims_only_the_unprintable_bytes() {
+        let mut buffer = Buffer::no_color();
+        write_readable(&mut buffer, b"ab\x02\x01cd", 64);
+        assert_eq!(buffer.as_slice(), b"ab[2][1]cd");
     }
 }

@@ -1,6 +1,6 @@
 use chrono::Local;
 use hablog::capture::CaptureWriter;
-use hablog::logger::{escaped, ConsoleLogger};
+use hablog::logger::{readable, ConsoleLogger};
 use hablog::model::Direction;
 use hablog::origins::crypto::{self, OriginsSession, StreamKind};
 use hablog::origins::discovery::{self, DiscoverySnapshot, ObservedEndpoint};
@@ -10,7 +10,7 @@ use hablog::origins::observer::{
 };
 use hablog::origins::routing::RoutePlan;
 use hablog::proxy::{ProxyConfig, ProxyEvent, ProxyHandle};
-use hablog::settings::{self, Settings, Source};
+use hablog::settings::{self, Settings, Show, Source};
 use hablog::wsl;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -460,6 +460,9 @@ struct TrafficLog {
     upstream: String,
     sessions: u64,
     capture: Option<CaptureWriter>,
+    /// The observer is reporting decrypted messages, so the encrypted chunks
+    /// they came in are only shown with `show_raw`.
+    decrypting: bool,
 }
 
 impl TrafficLog {
@@ -469,6 +472,7 @@ impl TrafficLog {
             upstream,
             sessions: 0,
             capture: None,
+            decrypting: false,
         }
     }
 
@@ -477,6 +481,11 @@ impl TrafficLog {
             "Relay ready on {address}, forwarding to {}",
             self.upstream
         ));
+        if self.settings.show != Show::None {
+            ConsoleLogger::normal(
+                "Each message is one line: direction, header, ID and body, with unprintable bytes as [n].",
+            );
+        }
     }
 
     fn connected(&mut self, peer: &str, upstream: &str) {
@@ -507,8 +516,16 @@ impl TrafficLog {
                 self.capture = None;
             }
         }
-        if self.settings.shows(direction) {
-            ConsoleLogger::log_chunk(direction, bytes);
+        if !self.settings.shows(direction) {
+            return;
+        }
+        let plain = fuse::plain_messages(direction, bytes);
+        if self.settings.show_raw || (plain.is_none() && !self.decrypting) {
+            ConsoleLogger::log_raw(direction, "wire", bytes);
+        }
+        // Before encryption starts, the handshake travels as plain messages.
+        for message in plain.unwrap_or_default() {
+            print_message(direction, message);
         }
     }
 
@@ -531,7 +548,10 @@ impl TrafficLog {
     fn observer(&mut self, event: ObserverEvent) {
         match event {
             ObserverEvent::Status { state, detail } => match state.as_str() {
-                "observing" => ConsoleLogger::success("Decrypted traffic is on."),
+                "observing" => {
+                    self.decrypting = true;
+                    ConsoleLogger::success("Decrypted traffic is on.");
+                }
                 "client_resumed" => ConsoleLogger::success("Started the game."),
                 "signature_mismatch_proceeding" => ConsoleLogger::warning(format!(
                     "The game's crypto module differs from the verified one ({detail}); decrypting anyway."
@@ -547,18 +567,16 @@ impl TrafficLog {
                 }
                 // Metadata-only operations carry no bytes.
                 match op.plaintext_hex().map(hex::decode) {
+                    Some(Ok(plaintext)) if op.kind == "payload" => {
+                        for message in fuse::split_payload(op.direction, &plaintext) {
+                            print_message(op.direction, message);
+                        }
+                    }
+                    // The frame header only carries the payload's length.
                     Some(Ok(plaintext)) => {
-                        // Logs get shared; the login password stays off the screen.
-                        let masked = (op.direction == Direction::ClientToServer
-                            && op.kind == "payload")
-                            .then(|| fuse::mask_login_password(&plaintext))
-                            .flatten();
-                        ConsoleLogger::log_decrypted(
-                            op.direction,
-                            &op.kind,
-                            &op.sequence,
-                            masked.as_deref().unwrap_or(&plaintext),
-                        )
+                        if self.settings.show_raw {
+                            ConsoleLogger::log_raw(op.direction, "frame", &plaintext);
+                        }
                     }
                     Some(Err(_)) => ConsoleLogger::warning(format!(
                         "The observer sent unreadable bytes for {} #{}",
@@ -568,15 +586,20 @@ impl TrafficLog {
                 }
             }
             ObserverEvent::SocketConnect { host, port, .. } => {
-                ConsoleLogger::normal(format!("The game is connecting to {host}:{port}."))
+                if self.settings.show_raw {
+                    ConsoleLogger::normal(format!("The game is connecting to {host}:{port}."));
+                }
             }
             ObserverEvent::Dropped(count) => ConsoleLogger::warning(format!(
                 "The observer skipped {count} operations because its buffer was full."
             )),
             ObserverEvent::Error(error) => ConsoleLogger::error(format!("Observer: {error}")),
-            ObserverEvent::Detached { .. } | ObserverEvent::Exited => ConsoleLogger::warning(
-                "The observer stopped, so decrypted traffic is no longer shown.",
-            ),
+            ObserverEvent::Detached { .. } | ObserverEvent::Exited => {
+                self.decrypting = false;
+                ConsoleLogger::warning(
+                    "The observer stopped, so decrypted traffic is no longer shown.",
+                )
+            }
             ObserverEvent::Spawned => {}
         }
     }
@@ -591,6 +614,16 @@ impl TrafficLog {
         }
         ConsoleLogger::flush();
     }
+}
+
+/// One message as a row. Logs get shared, so the login password is masked.
+fn print_message(direction: Direction, message: &[u8]) {
+    let masked = (direction == Direction::ClientToServer)
+        .then(|| fuse::mask_login_password(message))
+        .flatten();
+    let message = masked.as_deref().unwrap_or(message);
+    let (header, body) = message.split_at(message.len().min(2));
+    ConsoleLogger::log_message(direction, header, fuse::id(message), body);
 }
 
 fn details_command() {
@@ -766,7 +799,7 @@ fn decrypt_command() {
         })();
         match result {
             Ok(plaintext) => {
-                println!("Plaintext: {}", escaped(&plaintext, usize::MAX));
+                println!("Plaintext: {}", readable(&plaintext, usize::MAX));
                 println!("      hex: {}", hex::encode(&plaintext));
                 sequence = sequence.wrapping_add(1);
             }

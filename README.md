@@ -32,23 +32,26 @@ The first run creates `hablog.toml` next to where you run Hablog, with every set
 | `launch` | `true` | Start the game automatically. |
 | `decrypt` | `true` | Show decrypted traffic through the observer when it's available. |
 | `show` | `"both"` | Which traffic to print: `"both"`, `"in"`, `"out"` or `"none"`. |
+| `show_raw` | `false` | Also print the raw TCP chunks and frame headers. |
 | `save_captures` | `true` | Save each session to its own file. |
 | `captures_folder` | `"logs"` | Where those files go. |
 
 `[advanced]` has settings you normally don't need: a different game server, AppData folders elsewhere (such as a Wine prefix), and the observer's folder. A typo in the file is reported instead of being ignored.
 
+## Reading the log
+Each game message is one line: direction, its two-character header, the header's numeric ID, then the body. Bytes that can't be printed show as `[n]`, like the `[2]` that ends a string:
+
+```
+18:15:02.114  IN  @B    2  PBfuse_login[2]fuse_buy_credits[2]fuse_trade[2]
+18:15:02.120 OUT  @Z   26  @Jclub_habbo
+```
+
+The first messages of a session, the key exchange, travel unencrypted and always show this way. Everything after that is encrypted, and needs the observer to be read.
+
+`show_raw = true` in `hablog.toml` adds the raw traffic underneath, dimmed: each TCP chunk as it was sent (`wire`), the small frame header before each decrypted message (`frame`), and the connections the game opens. Without decrypted traffic, the encrypted chunks are printed anyway, since they are all there is to show. The capture files always hold every chunk.
+
 ## Decrypted traffic
-Origins encrypts its traffic, so without the observer the console shows each encrypted TCP chunk:
-
-```
-18:15:02.114 [Out][wire 10 B][QEBsb2dpbg]
-```
-
-The observer in [automation/](automation/README.md) starts the game through Frida and reads the game's own encrypt/decrypt calls, so you see the messages themselves:
-
-```
-18:15:02.114 [In][payload #12][@Bhello\x01]
-```
+The observer in [automation/](automation/README.md) starts the game through Frida and reads the game's own encrypt/decrypt calls, so the encrypted messages can be shown too.
 
 It needs [Node.js](https://nodejs.org) 22 or later. When it isn't installed yet, Hablog asks whether to run `npm ci` in `automation/` for you. It only supports the BobbaXtra build it was written for (client 371 still ships it) and refuses any other without touching the game, in which case the game starts normally.
 
@@ -97,7 +100,7 @@ A row is a TCP read, not necessarily one complete message.
 * `origins/routing.rs`: Writes the routed copy of the client.
 * `origins/observer.rs`: Runs the observer in `automation/` and reads its events.
 * `origins/crypto.rs`: The session decoder used by `hablog decrypt`.
-* `origins/fuse.rs`: Recognizes the login message so its password can be masked.
+* `origins/fuse.rs`: Splits traffic into FUSE messages and masks the login password.
 
 ## Tests
 

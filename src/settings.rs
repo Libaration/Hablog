@@ -29,6 +29,12 @@ decrypt = true
 # server) or "none". The capture files always get both.
 show = "both"
 
+# Also print the raw traffic underneath the messages: every TCP chunk as it
+# was sent, the frame header before each decrypted message, and where the
+# game connects. When decrypted traffic isn't available, the encrypted chunks
+# are printed anyway, since they are all there is to show.
+show_raw = false
+
 # Save each session's raw traffic to its own file in captures_folder.
 save_captures = true
 captures_folder = "logs"
@@ -55,6 +61,7 @@ pub struct Settings {
     pub launch: bool,
     pub decrypt: bool,
     pub show: Show,
+    pub show_raw: bool,
     pub save_captures: bool,
     pub captures_folder: PathBuf,
     pub advanced: Advanced,
@@ -93,6 +100,7 @@ impl Default for Settings {
             launch: true,
             decrypt: true,
             show: Show::Both,
+            show_raw: false,
             save_captures: true,
             captures_folder: PathBuf::from("logs"),
             advanced: Advanced::default(),
