@@ -27,6 +27,8 @@ Hablog relays Habbo Origins through your computer and logs its traffic.
   hablog details   Show the installed client's connection details.
   hablog decode    Turn VL64 and B64 values from the log into numbers, and
                    numbers into them: `hablog decode PB`, `hablog decode 206`.
+  hablog build     Build an exact message from typed values, the reverse of
+                   decode: `hablog build @C b:true i:0 s:hello`.
   hablog decrypt   Decrypt a captured message with your session key.
 
 Settings are in hablog.toml, which Hablog creates with an explanation of every
@@ -41,9 +43,10 @@ async fn main() {
     let mut args = std::env::args().skip(1);
     let command = args.next();
     let rest: Vec<String> = args.collect();
-    if command.as_deref() == Some("decode") {
-        decode_command(&rest.join(" "));
-        return;
+    match command.as_deref() {
+        Some("decode") => return decode_command(&rest.join(" ")),
+        Some("build") => return build_command(&rest.join(" ")),
+        _ => {}
     }
     if !rest.is_empty() {
         usage_error("Hablog takes no options; settings are in hablog.toml.");
@@ -832,6 +835,118 @@ fn decode(value: &str) -> Vec<String> {
     lines
 }
 
+const BUILD_HELP: &str = "\
+Start with the header, as in the log (@C) or as its ID (3), then the values:
+  i:5        a number (VL64)
+  b:true     a boolean, true/false or 1/0 (VL64 I/H)
+  s:text     a string; ends with [2] for the client, carries its length for the server
+  r:text     raw bytes, exactly as written
+A space followed by another i:, b:, s: or r: starts the next value, so text can
+contain spaces. [n] is byte n, as in the log. A message is built as the server
+sends it to the game; start with `out` for one the game sends.";
+
+/// Builds the message described by `spec`, or each one typed at the prompt.
+fn build_command(spec: &str) {
+    if !spec.is_empty() {
+        match build(spec) {
+            Ok(lines) => lines.iter().for_each(|line| println!("{line}")),
+            Err(e) => {
+                eprintln!("{e}\n\n{BUILD_HELP}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+    println!("{BUILD_HELP}\n\nPress Enter on an empty line to quit.");
+    while let Some(spec) = ask("Message", "").filter(|spec| !spec.is_empty()) {
+        match build(&spec) {
+            Ok(lines) => lines.iter().for_each(|line| println!("  {line}")),
+            Err(e) => println!("  {e}"),
+        }
+    }
+}
+
+/// The message described by `spec` in log notation, and as hex.
+fn build(spec: &str) -> Result<[String; 2], String> {
+    let words: Vec<&str> = spec.split(' ').collect();
+    let mut index = 0;
+    let missing = "The header is missing.";
+    let mut direction = Direction::ServerToClient;
+    let mut header = next_word(&words, &mut index).ok_or(missing)?;
+    match header.to_ascii_lowercase().as_str() {
+        "out" => {
+            direction = Direction::ClientToServer;
+            header = next_word(&words, &mut index).ok_or(missing)?;
+        }
+        "in" => header = next_word(&words, &mut index).ok_or(missing)?,
+        _ => {}
+    }
+    let header =
+        match header.parse::<u16>() {
+            Ok(id) => id,
+            Err(_) => {
+                let bytes = from_readable(header);
+                fuse::id(&bytes).filter(|_| bytes.len() == 2).ok_or_else(|| {
+                format!("{header} is not a header; use two characters like @C, or an ID like 3.")
+            })?
+            }
+        };
+    // Values start at a word with a type; any other word continues the
+    // previous value's text after a space.
+    let mut values: Vec<(char, String)> = Vec::new();
+    for &word in &words[index..] {
+        match word.split_once(':') {
+            Some((kind @ ("i" | "b" | "s" | "r"), text)) => {
+                values.push((kind.chars().next().unwrap_or('r'), text.to_owned()))
+            }
+            _ => match values.last_mut() {
+                Some(('s' | 'r', text)) => {
+                    text.push(' ');
+                    text.push_str(word);
+                }
+                _ if word.is_empty() => {}
+                _ => {
+                    return Err(format!(
+                        "{word} has no type; write i:, b:, s: or r: before it."
+                    ))
+                }
+            },
+        }
+    }
+    let values = values
+        .into_iter()
+        .map(|(kind, text)| match kind {
+            'i' => text
+                .parse()
+                .map(fuse::Value::Int)
+                .map_err(|_| format!("i:{text} is not a whole number.")),
+            'b' => match text.to_ascii_lowercase().as_str() {
+                "true" | "1" => Ok(fuse::Value::Bool(true)),
+                "false" | "0" => Ok(fuse::Value::Bool(false)),
+                _ => Err(format!("b:{text} is not true or false.")),
+            },
+            's' => Ok(fuse::Value::Str(from_readable(&text))),
+            _ => Ok(fuse::Value::Raw(from_readable(&text))),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let message = fuse::build(direction, header, &values)?;
+    Ok([
+        readable(&message, usize::MAX),
+        format!("hex: {}", hex::encode(&message)),
+    ])
+}
+
+/// The next non-empty word from `index` on.
+fn next_word<'a>(words: &[&'a str], index: &mut usize) -> Option<&'a str> {
+    while let Some(&word) = words.get(*index) {
+        *index += 1;
+        if !word.is_empty() {
+            return Some(word);
+        }
+    }
+    None
+}
+
 /// Asks for each value, remembering the previous answers as defaults.
 fn decrypt_command() {
     let key = match std::fs::read_to_string(SESSION_KEY_FILE) {
@@ -962,6 +1077,41 @@ mod tests {
             decode("@Jclub_habbo")[1],
             "B64:  a 10-character string: club_habbo"
         );
+    }
+
+    #[test]
+    fn builds_messages_from_typed_values() {
+        assert_eq!(
+            build("@C b:true b:false i:0").unwrap(),
+            ["@CIHH[1]", "hex: 404349484801"]
+        );
+        assert_eq!(
+            build("3 s:hello world i:2").unwrap()[0],
+            "@Chello world[2]J[1]"
+        );
+        assert_eq!(build("in @F r:35.0").unwrap()[0], "@F35.0[1]");
+        assert_eq!(build("out  @Z s:club_habbo").unwrap()[0], "@Z@Jclub_habbo");
+        assert_eq!(build("@B r:a[9]b[13]").unwrap()[0], "@Ba[9]b[13][1]");
+        // What decode reads back.
+        assert_eq!(
+            decode("PBfuse_login[2][1]")[0],
+            "VL64: PB = 8, then fuse_login[2][1]"
+        );
+        assert_eq!(
+            build("@B i:8 s:fuse_login").unwrap()[0],
+            "@BPBfuse_login[2][1]"
+        );
+    }
+
+    #[test]
+    fn explains_what_is_wrong_with_a_message() {
+        assert!(build("").unwrap_err().contains("header is missing"));
+        assert!(build("out").unwrap_err().contains("header is missing"));
+        assert!(build("@ i:1").unwrap_err().contains("not a header"));
+        assert!(build("@C i:x").unwrap_err().contains("whole number"));
+        assert!(build("@C b:2").unwrap_err().contains("true or false"));
+        assert!(build("@C hello").unwrap_err().contains("no type"));
+        assert!(build("5000").unwrap_err().contains("too large"));
     }
 
     #[test]

@@ -46,7 +46,9 @@ Each game message is one line: direction, its two-character header, the header's
 18:15:02.120 OUT  @Z   26  @Jclub_habbo
 ```
 
-Client and server use separate header sets, so `IN @D` and `OUT @D` are unrelated messages. Numbers in a body are written in VL64 (server bodies mostly: `PB` above is 8) or as B64 lengths (client strings: `@J` is 10, then the 10 characters `club_habbo`); `hablog decode` reads and writes both.
+Client and server use separate header sets, so `IN @D` and `OUT @D` are unrelated messages. Numbers in a body are written in VL64 (server bodies mostly: `PB` above is 8) or as B64 lengths (client strings: `@J` is 10, then the 10 characters `club_habbo`); `hablog decode` reads and writes both. Booleans are VL64 too (`H` false, `I` true), so the bytes alone can't tell `I` = 1 from `I` = true. Some Shockwave messages also separate fields with `[9]` (tab) or `[13]` (line break), or send a value as plain text with no end at all.
+
+Every session starts with `IN @@ 0 [1]`: HELLO, after which the game starts sending.
 
 The first messages of a session, the key exchange, travel unencrypted and always show this way. Everything after that is encrypted, and needs the observer to be read.
 
@@ -83,6 +85,20 @@ B64:  CN (a header or string length), @CN (a client message length)
 ```
 
 Without a value it keeps asking for more.
+
+```bash
+cargo run --release -- build @C b:true i:0 s:hello
+```
+
+The reverse of `decode`: builds the exact message from its header and typed values, in the notation the log uses:
+
+```
+$ hablog build DA i:6 i:0 i:0 i:1 i:1 i:3 i:0 i:2 i:0 i:4 i:1 i:5 s:dd-MM-yyyy
+DARAHHIIKHJHPAIQAdd-MM-yyyy[2][1]
+hex: 44415241484849494b484a48504149514164642d4d4d2d797979790201
+```
+
+The header is written as in the log (`DA`) or as its ID (`257`). Values are `i:` numbers, `b:` true/false, `s:` strings and `r:` raw text, with `[n]` for any byte. Messages are built as the server sends them to the game (strings end with `[2]`, the message with `[1]`); start with `out` for a message the game sends, where strings carry their length instead. Hablog can't send messages yet.
 
 ```bash
 cargo run --release -- decrypt

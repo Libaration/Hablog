@@ -122,6 +122,54 @@ pub fn vl64_encode(value: i32) -> Vec<u8> {
     bytes
 }
 
+/// One value in a message being built.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Value {
+    /// A VL64 number.
+    Int(i32),
+    /// A VL64 0 or 1.
+    Bool(bool),
+    /// Text: ended by `\x02` from the server, length-prefixed from the client.
+    Str(Vec<u8>),
+    /// Bytes exactly as given.
+    Raw(Vec<u8>),
+}
+
+/// The exact message for `header` and `values`, as Hablog shows it in the
+/// log: a server message ends with `\x01`; a client message is shown without
+/// the length that precedes it on an unencrypted wire.
+pub fn build(direction: Direction, header: u16, values: &[Value]) -> Result<Vec<u8>, String> {
+    let mut message = b64_encode(usize::from(header), 2)
+        .ok_or_else(|| format!("Header {header} is too large; headers go up to 4095."))?;
+    for value in values {
+        match value {
+            Value::Int(number) => message.extend(vl64_encode(*number)),
+            Value::Bool(flag) => message.extend(vl64_encode(i32::from(*flag))),
+            Value::Raw(bytes) => message.extend_from_slice(bytes),
+            Value::Str(text) => match direction {
+                Direction::ServerToClient => {
+                    message.extend_from_slice(text);
+                    message.push(2);
+                }
+                Direction::ClientToServer => {
+                    let length = b64_encode(text.len(), 2).ok_or_else(|| {
+                        format!(
+                            "A client string can be at most 4095 bytes; this one is {}.",
+                            text.len()
+                        )
+                    })?;
+                    message.extend(length);
+                    message.extend_from_slice(text);
+                }
+            },
+        }
+    }
+    if direction == Direction::ServerToClient {
+        message.push(END);
+    }
+    Ok(message)
+}
+
 /// A copy of a decrypted client message with the login password replaced by
 /// `*`, or None when it isn't a well-formed login message.
 pub fn mask_login_password(message: &[u8]) -> Option<Vec<u8>> {
@@ -294,6 +342,58 @@ mod tests {
         assert_eq!(b64_encode(139, 3).unwrap(), b"@BK");
         assert_eq!(b64_encode(4096, 2), None);
         assert_eq!(b64(b"@BK", 3), Some((139, &b""[..])));
+    }
+
+    #[test]
+    fn builds_a_real_server_message_byte_for_byte() {
+        // The session parameters from a real decrypted session.
+        let values: Vec<Value> = [6, 0, 0, 1, 1, 3, 0, 2, 0, 4, 1, 5]
+            .into_iter()
+            .map(Value::Int)
+            .chain([Value::Str(b"dd-MM-yyyy".to_vec())])
+            .collect();
+        assert_eq!(
+            build(Direction::ServerToClient, 257, &values).unwrap(),
+            b"DARAHHIIKHJHPAIQAdd-MM-yyyy\x02\x01"
+        );
+        assert_eq!(
+            build(
+                Direction::ServerToClient,
+                3,
+                &[Value::Bool(true), Value::Bool(false), Value::Int(0)]
+            )
+            .unwrap(),
+            b"@CIHH\x01"
+        );
+        assert_eq!(
+            build(
+                Direction::ServerToClient,
+                6,
+                &[Value::Raw(b"35.0".to_vec())]
+            )
+            .unwrap(),
+            b"@F35.0\x01"
+        );
+    }
+
+    #[test]
+    fn client_strings_carry_their_length() {
+        assert_eq!(
+            build(
+                Direction::ClientToServer,
+                26,
+                &[Value::Str(b"club_habbo".to_vec())]
+            )
+            .unwrap(),
+            b"@Z@Jclub_habbo"
+        );
+        assert!(build(
+            Direction::ClientToServer,
+            1,
+            &[Value::Str(vec![b'x'; 4096])]
+        )
+        .is_err());
+        assert!(build(Direction::ServerToClient, 4096, &[]).is_err());
     }
 
     #[test]
