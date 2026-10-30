@@ -1,7 +1,6 @@
 # Hablog
-This project is a simple TCP proxy implemented in Rust using the Tokio asynchronous runtime.
-It relays traffic between the Habbo client and the game server and logs the packets in both directions, with names for known headers. It also supports Habbo Origins (see below).
-This was kinda just an excuse to learn more Rust, but it'd be pretty easy to use as a starting point to add packet headers / packet sending.
+Hablog relays Habbo Origins through your computer and logs its traffic. It's a TCP proxy written in Rust on the Tokio runtime.
+This was kinda just an excuse to learn more Rust, but it'd be pretty easy to use as a starting point for packet tooling.
 
 ## Running
 
@@ -9,107 +8,87 @@ This was kinda just an excuse to learn more Rust, but it'd be pretty easy to use
 cargo run --release
 ```
 
-Hablog doesn't need root and doesn't change any system settings. It listens on `127.0.0.1:38101` and forwards to `game-us.habbo.com:38101`. Both can be changed:
+That's it. Hablog:
 
-| Option | Default | |
+1. Finds the Origins client the Habbo Launcher installed, and reads the game server from the client itself.
+2. Starts the relay on `127.0.0.1` and writes `Hablog-Routed.exe` next to the client: a copy that connects to the relay instead. The installed client, the launcher and the hosts file are never changed.
+3. Starts the game. When the observer is set up it starts it through Frida so you also see the decrypted traffic; the first time, Hablog offers to set it up for you.
+4. Prints the traffic and saves each session to `logs/`.
+5. Stops when you close the game, or when you press Ctrl+C.
+
+Close Origins first if it's already open; that copy is connected directly. Origins is a Windows game, so on macOS and Linux Hablog prepares everything and tells you which file to start.
+
+## Settings
+The first run creates `hablog.toml` next to where you run Hablog, with every setting explained. The defaults are the automatic behavior above, so you only need it to change something:
+
+| Setting | Default | |
 |---|---|---|
-| `--listen ADDR` | `127.0.0.1:38101` | Address the client connects to. Must be loopback. |
-| `--upstream ADDR` | `game-us.habbo.com:38101` | The real game server. |
-| `--capture-dir DIR` | `logs` | Where per-session capture files are written. |
-| `--no-capture` | | Don't write capture files. |
-| `--no-client-log` | | Don't print client to server packets (still captured). |
-| `--no-server-log` | | Don't print server to client packets (still captured). |
+| `hotel` | `"auto"` | The hotel the launcher last opened, or `"hhous"`, `"hhobr"`, `"hhoes"`. |
+| `launch` | `true` | Start the game automatically. |
+| `decrypt` | `true` | Show decrypted traffic through the observer when it's available. |
+| `show` | `"both"` | Which traffic to print: `"both"`, `"in"`, `"out"` or `"none"`. |
+| `save_captures` | `true` | Save each session to its own file. |
+| `captures_folder` | `"logs"` | Where those files go. |
 
-Ctrl+C (or SIGTERM) closes the connection and the listener cleanly. Press it twice to stop immediately.
+`[advanced]` has settings you normally don't need: a different game server, AppData folders elsewhere (such as a Wine prefix), and the observer's folder. A typo in the file is reported instead of being ignored.
 
-## Routing the client
-Hablog no longer edits `/etc/hosts`. You decide how the client's connection reaches the listener, and undo it when you're done.
+## Decrypted traffic
+Origins encrypts its traffic, so without the observer the console shows each encrypted TCP chunk:
 
-The simplest way is a hosts entry that you add and remove yourself. Look up the server's real address first, because once the entry exists the game host resolves to `127.0.0.1`:
-
-```bash
-dig +short game-us.habbo.com
+```
+18:15:02.114 [Out][wire 10 B][QEBsb2dpbg]
 ```
 
-Add `127.0.0.1 game-us.habbo.com` to `/etc/hosts`, then give Hablog the address you looked up:
+The observer in [automation/](automation/README.md) starts the game through Frida and reads the game's own encrypt/decrypt calls, so you see the messages themselves:
 
-```bash
-cargo run --release -- --upstream <real IP>:38101
+```
+18:15:02.114 [In][payload #12][@Bhello\x01]
 ```
 
-If you forget, Hablog refuses to start rather than connecting to itself. While the entry is in place the client only works with Hablog running, so remove it afterwards. Any other redirect (a firewall rule, a client you can point at another host) works the same way.
+It needs [Node.js](https://nodejs.org) 22 or later. When it isn't installed yet, Hablog asks whether to run `npm ci` in `automation/` for you. It only supports the BobbaXtra build it was written for and refuses any other without touching the game, in which case the game starts normally. Decrypted messages are only printed, never saved, because they include what you type, such as your password.
 
-## Connections
-* One client is relayed at a time. A second client is closed while one is active, and a new client is accepted after the current one disconnects, so you can relog without restarting Hablog.
-* Half-closes are forwarded after pending bytes, so the last packets in either direction aren't lost.
-* Connecting to the game server times out after 5 seconds per address, and errors are logged instead of crashing the proxy.
-* Logging never slows forwarding down. If the log falls behind, chunks are left out of it and the count is reported.
+## Other commands
 
-## Logs
-Every line on the console is timestamped. Packets look like `[In][header][name][body]` for server to client and `[Out][header][name][body]` for client to server. Packets are reassembled from the TCP stream, so packets split across reads or sharing one read are logged correctly. Habbo encrypts client to server traffic after the handshake. When that direction stops parsing, Hablog says so once and keeps forwarding and capturing it.
+```bash
+cargo run --release -- details
+```
 
-Each client session is also captured to its own file, for example `logs/hablog-20261030-181502-1.jsonl`. Existing files are never overwritten. The first line is a header, then one line per TCP chunk with the exact bytes as hex:
+Shows what Hablog found: the launcher, the installed version, and for each hotel the game and MUS servers built into its client, its site and external variables URLs, and any client that is already running.
+
+```bash
+cargo run --release -- decrypt
+```
+
+Decrypts captured messages by hand with your own session's shared key (56 bytes as 112 hex characters, from the client's `Crypto_GetSharedKeyHex`). It reads the key from `session.secret` if that file exists, otherwise it asks, then asks for each message's details and remembers your last answers. Files ending in `.secret` are ignored by git. The cipher has no authentication tag, so a wrong key or counter still gives output; it just isn't readable.
+
+## Captures
+Each session is saved to its own file, for example `logs/hablog-20261030-181502-1.jsonl`, and existing files are never overwritten. The first line is a header, then one line per TCP chunk with its exact bytes as hex:
 
 ```json
-{"format":"hablog-capture","version":1,"record_kind":"tcp_chunk","client":"127.0.0.1:52144","upstream":"1.2.3.4:38101","started_ms":1793358835100}
-{"index":1,"timestamp_ms":1793358835100,"direction":"client_to_server","bytes":"0000000607980000..."}
+{"format":"hablog-capture","version":1,"record_kind":"tcp_chunk","client":"127.0.0.1:52144","upstream":"1.2.3.4:40001","started_ms":1793358835100}
+{"index":1,"timestamp_ms":1793358835100,"direction":"client_to_server","bytes":"51454273623264706267"}
 ```
 
-A row is a TCP read, not necessarily one complete packet.
+A row is a TCP read, not necessarily one complete message.
 
-## Habbo Origins
-Hablog also relays the Origins client (Windows, Shockwave build 368). It reads the connection details from the installed client itself, so you don't type in any addresses.
-
-```bash
-cargo run --release -- origins-details
-```
-
-prints the Habbo Launcher, the installed version, and for each region (`hhous`, `hhobr`, `hhoes`, `hhod`) the game and MUS host:port embedded in that region's client, plus its site and external variables URLs and any client that is already running. `--json` prints everything, including the byte offsets the addresses were read from.
-
-```bash
-cargo run --release -- origins
-```
-
-1. Discovers the client the launcher last selected (or the region given with `--server hhobr`).
-2. Starts the relay on `127.0.0.1:<game port>`, forwarding to the real game host.
-3. Writes `Hablog-Routed.exe` next to the installed client: a copy whose game host is replaced with `127.0.0.1`. The installed client, the launcher and the hosts file are never changed. The MUS connection is not redirected.
-4. Launches that copy. Use `--no-launch` to start it yourself. On macOS and Linux it's only written, since the client runs on Windows.
-
-Close any Origins client you already have open first, since it is connected directly. The installation is found through `%APPDATA%` and `%LOCALAPPDATA%`; `--appdata` and `--local-appdata` point it elsewhere, for example into a Wine prefix. Logging and capture work as for Habbo, but Origins traffic is encrypted, so the console shows each TCP chunk instead of packets.
-
-### Decrypted traffic
-`--observe` launches the routed client through the Frida observer in [automation/](automation/README.md). It reads the client's own encrypt/decrypt calls and Hablog prints each decrypted operation:
-
-```
-18:15:02.114 [In][payload #12][...]
-```
-
-It needs Node.js 22 or later and a one-time `npm ci` in `automation/`. It supports only the BobbaXtra build it was written for, and refuses any other build without installing hooks. Decrypted bytes are only printed, never written to disk, because they include what you type, such as your password.
-
-### Decrypting by hand
-With your own session's shared key (56 bytes as 112 hex characters, from the client's `Crypto_GetSharedKeyHex`) in a file:
-
-```bash
-cargo run --release -- origins-decrypt --key-file my.secret --direction in --stream payload --sequence 12 <base64 wire value>
-```
-
-`--direction` is `in` (server to client) or `out`, `--stream` is `header` or `payload`, and `--sequence` is that stream's counter, starting at 0 for each session. `--hex` takes hex instead of Base64. `origins-encrypt` does the reverse from hex plaintext. The key can also come from the `HABLOG_SESSION_KEY` environment variable. Files ending in `.secret` are ignored by git.
-
-The cipher has no authentication tag, so a wrong key, stream or counter still produces output; it just isn't readable. The key derivation follows static analysis of BobbaXtra build 368 and is checked against the RFC 5869/8439 test vectors and a fixed four-stream fixture, not against a live session.
+## How the relay handles connections
+* One game connection is relayed at a time. Another one is closed while it's active, and a new one is accepted after it disconnects, so you can relog without restarting Hablog.
+* Each direction is copied by its own loop in a single task, with Nagle's algorithm off for low latency. When one side closes, its last bytes are forwarded before the close is passed on.
+* The game server's DNS name is looked up for each connection, connecting times out after 5 seconds per address, and errors are reported without stopping the relay.
+* Logging never slows the game down. Traffic is handed to the log through a bounded queue; if the log falls behind, chunks are left out of it (and counted) rather than delaying forwarding. The log handles the queue in batches with one console write and one capture write each, since the Windows console is slow per write.
+* The relay only listens on loopback, and refuses a game server that resolves to the relay itself.
 
 ## Project Structure
-* `main.rs`: The Habbo and Origins commands, the console log and per-session captures, and shutdown on Ctrl+C/SIGTERM.
-* `cli.rs`: Command-line options.
-* `proxy.rs`: The relay. Accepts the client, connects to the game server, forwards both directions and reports events (listening, connected, data, disconnected, errors).
+* `main.rs`: The commands, starting the game, and the console log and captures.
+* `settings.rs`: `hablog.toml` and its documented template.
+* `proxy.rs`: The relay.
 * `capture.rs`: Writes the JSONL capture files.
-* `model.rs`: Traffic direction and capture records.
-* `packet_handler/packet_handler.rs`: Fetches packet names and reassembles each direction's TCP stream into packets.
-* `packet_handler/packet.rs`: The Packet struct and its byte readers.
 * `logger.rs`: Console output.
-* `origins/discovery.rs`: Finds the launcher, installed versions, regional clients and their embedded endpoints, and running clients.
+* `model.rs`: Traffic direction and capture records.
+* `origins/discovery.rs`: Finds the launcher, installed versions, each hotel's client and the servers built into it, and running clients.
 * `origins/routing.rs`: Writes the routed copy of the client.
-* `origins/crypto.rs`: The Origins session decoder.
-* `origins/observer.rs`: Runs the Frida observer in `automation/` and reads its events.
+* `origins/observer.rs`: Runs the observer in `automation/` and reads its events.
+* `origins/crypto.rs`: The session decoder used by `hablog decrypt`.
 
 ## Tests
 
@@ -117,18 +96,14 @@ The cipher has no authentication tag, so a wrong key, stream or counter still pr
 cargo test
 ```
 
-The loopback tests cover exact forwarding in both directions, half-closes, reconnects, rejecting a second client, shutdown, the loopback-only listener, the self-connection check and a full log queue. The Origins tests cover discovery against fixture installations, routing, the crypto test vectors and observer events. The observer has its own tests:
-
 ```bash
-cd automation && node --test test/*.test.mjs
+cd automation && npm test
 ```
 
-# Limited Example
+The Rust tests cover the relay over loopback (exact forwarding both ways, half-closes, reconnects, a second connection, shutdown, the self-connection check and a full log queue), discovery and routing against fixture installations, the settings template, the crypto test vectors, and the observer protocol against a stand-in companion (skipped without Node.js). The observer's own tests run its agent against simulated memory.
 
+# Demos of the original Habbo version
 
 https://github.com/Libaration/Hablog/assets/11550216/e01ad50f-07e5-4dbf-842e-d4c14cbec4cc
-
-# Packet Debugging
-
 
 https://github.com/Libaration/Hablog/assets/11550216/8865c60e-22a4-442c-9528-f77280a6472a

@@ -1,6 +1,7 @@
 //! Versioned JSONL captures: a header line, then one line per TCP chunk with its
 //! direction, timestamp and exact bytes. Each client session gets its own file.
-use crate::model::{now_ms, Direction, TrafficRecord};
+//! Records are buffered; call `flush` after a batch.
+use crate::model::{hex_bytes, now_ms, Direction};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
@@ -17,6 +18,16 @@ pub struct Header {
     pub client: String,
     pub upstream: String,
     pub started_ms: u64,
+}
+
+/// A `TrafficRecord` that borrows its bytes, so recording copies nothing.
+#[derive(Serialize)]
+struct RecordRef<'a> {
+    index: u64,
+    timestamp_ms: u64,
+    direction: Direction,
+    #[serde(serialize_with = "hex_bytes::serialize")]
+    bytes: &'a [u8],
 }
 
 pub struct CaptureWriter {
@@ -50,6 +61,7 @@ impl CaptureWriter {
             upstream: upstream.into(),
             started_ms: now_ms(),
         })?;
+        capture.flush()?;
         Ok(capture)
     }
 
@@ -62,22 +74,26 @@ impl CaptureWriter {
     }
 
     pub fn record(&mut self, direction: Direction, bytes: &[u8]) -> Result<(), String> {
-        self.write_line(&TrafficRecord {
+        self.write_line(&RecordRef {
             index: self.next_index,
             timestamp_ms: now_ms(),
             direction,
-            bytes: bytes.to_vec(),
+            bytes,
         })?;
         self.next_index += 1;
         Ok(())
     }
 
-    // Every line is flushed so the file can be followed live and survives a crash.
+    pub fn flush(&mut self) -> Result<(), String> {
+        self.writer
+            .flush()
+            .map_err(|e| format!("Cannot write capture {}: {e}", self.path.display()))
+    }
+
     fn write_line<T: Serialize>(&mut self, value: &T) -> Result<(), String> {
         serde_json::to_writer(&mut self.writer, value)
             .map_err(io::Error::from)
             .and_then(|_| self.writer.write_all(b"\n"))
-            .and_then(|_| self.writer.flush())
             .map_err(|e| format!("Cannot write capture {}: {e}", self.path.display()))
     }
 }
@@ -85,6 +101,7 @@ impl CaptureWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::TrafficRecord;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -105,6 +122,7 @@ mod tests {
             .unwrap();
         capture.record(Direction::ClientToServer, b"hi").unwrap();
         assert_eq!(capture.records(), 2);
+        capture.flush().unwrap();
 
         let text = fs::read_to_string(&path).unwrap();
         let mut lines = text.lines();

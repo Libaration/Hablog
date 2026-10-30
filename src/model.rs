@@ -34,7 +34,7 @@ pub struct TrafficRecord {
     pub bytes: Vec<u8>,
 }
 
-mod hex_bytes {
+pub(crate) mod hex_bytes {
     use serde::{Deserialize, Deserializer, Serializer};
     pub fn serialize<S: Serializer>(value: &[u8], s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&hex::encode(value))

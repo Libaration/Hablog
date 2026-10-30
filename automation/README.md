@@ -1,7 +1,7 @@
 # Origins observer companion
 
-`hablog origins --observe` starts this local companion through private
-stdin/stdout pipes. It launches the routed Origins client suspended through
+Hablog starts this local companion through private stdin/stdout pipes whenever
+`decrypt = true` in `hablog.toml` (the default) and it is set up. It launches the routed Origins client suspended through
 Frida, hooks the client's own BobbaXtra encrypt/decrypt calls, resumes it, and
 reports each operation's bytes so Hablog can print the decrypted traffic. The
 companion does not contact a remote Frida server, change installed game files,
@@ -11,7 +11,9 @@ removes it on detach. The client's own connections stay its own.
 
 ## Setup
 
-On the Windows machine that runs the client, with Node.js 22 or later:
+It needs Node.js 22 or later on the Windows machine that runs the game. The
+first time, Hablog asks whether to install the dependencies for you; to do it
+yourself:
 
 ```bash
 cd automation
@@ -19,8 +21,9 @@ npm ci
 ```
 
 Hablog looks for `host.mjs` in `observer/` next to the `hablog` executable, then
-in `./automation`, or wherever `--observer-dir` points. It runs it with a
-`node.exe` in that folder if there is one, otherwise with `node` from PATH.
+in `./automation`, or in `observer` under `[advanced]` in `hablog.toml`. It
+runs it with a `node.exe` in that folder if there is one, otherwise with `node`
+from PATH.
 
 `npm test` runs the fixtures without launching or attaching to anything.
 `npm run check` checks the JavaScript syntax.
@@ -38,7 +41,7 @@ The first control message is:
 ```
 
 Hablog fills in the paths from discovery. With `"launch":true` the companion
-launches that client suspended through Frida, attaches the agent, registers the
+launches that client suspended through Frida, reports `client_spawned`, attaches the agent, registers the
 module observer, then resumes it. A client the companion spawned is resumed even
 if startup fails, so it is never left suspended. Alternatively, omit `launch`
 and pass a `pid`, or neither to wait for an existing process whose executable
@@ -47,8 +50,13 @@ path exactly matches the validated client.
 `captureMode` defaults to `full`. `{"command":"capture_mode","mode":"metadata"}`
 switches to metadata mode, which copies no input/output bytes.
 `{"command":"stop"}` or closing stdin unloads the agent and detaches, leaving
-the client running. Hablog sends `stop` on Ctrl+C and gives the companion five
-seconds to exit before ending the helper process (never the game).
+the client running. Hablog sends `stop` when it exits and gives the companion
+five seconds to exit before ending the helper process (never the game).
+
+Hablog uses the status events to follow the game: an error before
+`client_spawned` means no game was started, so Hablog starts it normally
+instead, and `detached` with reason `process-terminated` means the game closed,
+so Hablog stops too.
 
 An observation event has this schema (the data below is only a fixture):
 
@@ -71,7 +79,7 @@ reported as established. The ordinary `connect` and `WSAConnect` exports are
 covered; other socket APIs remain unverified.
 
 Status events include `companion_ready`, `waiting_for_client`,
-`waiting_for_module`, `observing`, `signature_mismatch_proceeding`,
+`client_spawned`, `waiting_for_module`, `observing`, `signature_mismatch_proceeding`,
 `client_resumed`, `module_unloaded`, and `detached`. Errors are JSON events.
 
 ## Supported build

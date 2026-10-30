@@ -8,6 +8,7 @@
 //! files or transmits anything over a network.
 
 use crate::model::Direction;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -18,6 +19,7 @@ use tokio::task::JoinHandle;
 
 const EVENT_CAPACITY: usize = 1024;
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const MIN_NODE_MAJOR: u32 = 22;
 
 #[derive(Clone, Debug)]
 pub struct CryptoOp {
@@ -44,7 +46,16 @@ impl CryptoOp {
 
 #[derive(Clone, Debug)]
 pub enum ObserverEvent {
-    Status(String),
+    Status {
+        state: String,
+        detail: String,
+    },
+    /// The client process exists; from here on it may be running.
+    Spawned,
+    /// The companion lost the client, e.g. `process-terminated` when it closed.
+    Detached {
+        reason: String,
+    },
     Crypto(CryptoOp),
     SocketConnect {
         api: String,
@@ -76,11 +87,33 @@ pub struct ObserverRuntime {
     pub host_script: PathBuf,
 }
 
+/// Why the companion can't run yet.
+#[derive(Debug)]
+pub enum LocateError {
+    NotFound(String),
+    NoNode(String),
+    /// Everything is there except its npm dependencies (`npm ci` in the folder).
+    NotInstalled(PathBuf),
+}
+
+impl fmt::Display for LocateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LocateError::NotFound(message) | LocateError::NoNode(message) => f.write_str(message),
+            LocateError::NotInstalled(dir) => write!(
+                f,
+                "Frida is not installed for the observer; run `npm ci` in {}.",
+                dir.display()
+            ),
+        }
+    }
+}
+
 impl ObserverRuntime {
     /// Uses `dir` if given, otherwise `observer/` next to the executable or
     /// `automation/` in the working directory. A `node.exe` in that folder
     /// is preferred over `node` on PATH.
-    pub fn locate(dir: Option<&Path>) -> Result<Self, String> {
+    pub fn locate(dir: Option<&Path>) -> Result<Self, LocateError> {
         let candidates: Vec<PathBuf> = match dir {
             Some(dir) => vec![dir.to_path_buf()],
             None => {
@@ -99,30 +132,76 @@ impl ObserverRuntime {
             .iter()
             .find(|dir| dir.join("host.mjs").is_file())
             .ok_or_else(|| {
-                format!(
-                    "The observer companion (host.mjs) was not found in {}.",
+                LocateError::NotFound(format!(
+                    "The observer (host.mjs) was not found in {}.",
                     candidates
                         .iter()
                         .map(|dir| dir.display().to_string())
                         .collect::<Vec<_>>()
                         .join(" or ")
-                )
+                ))
             })?;
-        if !dir.join("node_modules").join("frida").is_dir() {
-            return Err(format!(
-                "Frida is not installed for the observer; run `npm ci` in {}.",
-                dir.display()
-            ));
-        }
         let bundled = dir.join("node.exe");
+        let node_exe = if bundled.is_file() {
+            bundled
+        } else {
+            PathBuf::from("node")
+        };
+        match node_major(&node_exe) {
+            Some(major) if major >= MIN_NODE_MAJOR => {}
+            Some(major) => {
+                return Err(LocateError::NoNode(format!(
+                    "The observer needs Node.js {MIN_NODE_MAJOR} or later; this is Node.js {major}."
+                )))
+            }
+            None => {
+                return Err(LocateError::NoNode(format!(
+                    "The observer needs Node.js {MIN_NODE_MAJOR} or later, which was not found."
+                )))
+            }
+        }
+        if !dir.join("node_modules").join("frida").is_dir() {
+            return Err(LocateError::NotInstalled(dir.clone()));
+        }
         Ok(Self {
-            node_exe: if bundled.is_file() {
-                bundled
-            } else {
-                PathBuf::from("node")
-            },
+            node_exe,
             host_script: dir.join("host.mjs"),
         })
+    }
+}
+
+fn node_major(node: &Path) -> Option<u32> {
+    let output = std::process::Command::new(node)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let version = String::from_utf8(output.stdout).ok()?;
+    version
+        .trim()
+        .strip_prefix('v')?
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Installs the companion's pinned dependencies with `npm ci`, showing npm's
+/// own output.
+pub async fn install(dir: &Path) -> Result<(), String> {
+    // npm is a .cmd script on Windows, which needs its full name.
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let status = Command::new(npm)
+        .arg("ci")
+        .current_dir(dir)
+        .status()
+        .await
+        .map_err(|e| format!("Cannot run npm: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("`npm ci` in {} failed ({status}).", dir.display()))
     }
 }
 
@@ -277,16 +356,21 @@ pub fn parse_event(value: &serde_json::Value) -> Option<ObserverEvent> {
         )),
         "status" => {
             let state = str_field(value, "state");
-            let extra = value
-                .get("detail")
-                .and_then(|v| v.as_str())
-                .or_else(|| value.get("module_path").and_then(|v| v.as_str()))
-                .unwrap_or("");
-            Some(ObserverEvent::Status(if extra.is_empty() {
-                state
-            } else {
-                format!("{state} · {extra}")
-            }))
+            match state.as_str() {
+                "client_spawned" => Some(ObserverEvent::Spawned),
+                "detached" => Some(ObserverEvent::Detached {
+                    reason: str_field(value, "reason"),
+                }),
+                _ => Some(ObserverEvent::Status {
+                    detail: value
+                        .get("detail")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| value.get("module_path").and_then(|v| v.as_str()))
+                        .unwrap_or_default()
+                        .to_owned(),
+                    state,
+                }),
+            }
         }
         "error" => Some(ObserverEvent::Error(format!(
             "{}: {}",
@@ -343,8 +427,16 @@ mod tests {
     #[test]
     fn parses_status_socket_and_error() {
         assert!(matches!(
-            parse_event(&serde_json::json!({"type":"status","state":"observing"})),
-            Some(ObserverEvent::Status(s)) if s == "observing"
+            parse_event(&serde_json::json!({"type":"status","state":"observing","module_path":"m"})),
+            Some(ObserverEvent::Status { state, detail }) if state == "observing" && detail == "m"
+        ));
+        assert!(matches!(
+            parse_event(&serde_json::json!({"type":"status","state":"client_spawned","pid":4})),
+            Some(ObserverEvent::Spawned)
+        ));
+        assert!(matches!(
+            parse_event(&serde_json::json!({"type":"status","state":"detached","reason":"process-terminated"})),
+            Some(ObserverEvent::Detached { reason }) if reason == "process-terminated"
         ));
         assert!(matches!(
             parse_event(&serde_json::json!({

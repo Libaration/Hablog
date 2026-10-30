@@ -35,6 +35,7 @@ class ObserverHost {
       // installed before resume, including Xtras loaded later at game startup.
       pid = await this.device.spawn([profile.executable, ...argv], { cwd: path.dirname(profile.executable), stdio: frida.Stdio.Pipe });
       this.spawnedPid = pid;
+      emit({ type: 'status', state: 'client_spawned', pid });
     } else if (pid === undefined) {
       emit({ type: 'status', state: 'waiting_for_client' });
       while (!this.stopped && pid === undefined) {

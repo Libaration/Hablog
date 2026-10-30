@@ -87,8 +87,17 @@ impl RoutePlan {
         if paths_equal(&self.routed_exe, &self.source_exe) {
             return Err("The routed copy must not overwrite the installed client.".into());
         }
-        fs::write(&self.routed_exe, &bytes)
-            .map_err(|e| format!("Cannot write {}: {e}", self.routed_exe.display()))?;
+        // An unchanged copy is left alone, so one that is still running
+        // (and therefore locked on Windows) doesn't block a restart.
+        if fs::read(&self.routed_exe).is_ok_and(|existing| existing == bytes) {
+            return Ok(self.routed_exe.clone());
+        }
+        fs::write(&self.routed_exe, &bytes).map_err(|e| {
+            format!(
+                "Cannot write {} (is it still running?): {e}",
+                self.routed_exe.display()
+            )
+        })?;
         Ok(self.routed_exe.clone())
     }
 }

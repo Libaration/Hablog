@@ -8,7 +8,4 @@ pub mod origins {
     pub mod routing;
 }
 pub mod proxy;
-pub mod packet_handler {
-    pub mod packet;
-    pub mod packet_handler;
-}
+pub mod settings;

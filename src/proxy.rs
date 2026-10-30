@@ -76,6 +76,11 @@ impl ProxyHandle {
             tx: event_tx,
             dropped: Arc::new(AtomicU64::new(0)),
         };
+        let upstream = Upstream {
+            name: config.upstream,
+            addresses: upstream,
+            listener: address,
+        };
         let worker = tokio::spawn(run(listener, upstream, events, shutdown_rx));
         Ok((
             Self {
@@ -157,9 +162,29 @@ impl Events {
     }
 }
 
+/// The game server's name and its last good addresses.
+struct Upstream {
+    name: String,
+    addresses: Vec<SocketAddr>,
+    listener: SocketAddr,
+}
+
+impl Upstream {
+    /// Looks the name up again for each connection, so a changed DNS record
+    /// is picked up. A failed lookup, or one that now points at the relay
+    /// itself, keeps the previous addresses.
+    async fn refresh(&mut self) {
+        if let Ok(fresh) = resolve(&self.name, "upstream").await {
+            if !fresh.contains(&self.listener) {
+                self.addresses = fresh;
+            }
+        }
+    }
+}
+
 async fn run(
     listener: TcpListener,
-    upstream: Vec<SocketAddr>,
+    mut upstream: Upstream,
     events: Events,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -197,7 +222,10 @@ async fn run(
         }
         let server = tokio::select! {
             _ = shutdown.wait_for(|stop| *stop) => break,
-            server = connect(&upstream) => server,
+            server = async {
+                upstream.refresh().await;
+                connect(&upstream.addresses).await
+            } => server,
         };
         let server = match server {
             Ok(server) => server,

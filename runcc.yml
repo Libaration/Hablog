@@ -1,5 +1,0 @@
-commands:
-  hablog: |
-    cargo run -p hablog
-  lib: |
-    sudo cargo watch -w lib -x "build -p lib"
