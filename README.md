@@ -31,9 +31,28 @@ Hablog also has a window, made with [Tauri](https://tauri.app). It does the same
 * **Builder**: `hablog build` and `hablog decode` as a form, with a live preview. Double-click a message in the log to open it here.
 * **Settings**: `hablog.toml` as a form. Saving keeps the file's comments.
 
-![The Packets tab, showing a made-up session](docs/images/window-packets.png)
+<table>
+  <tr>
+    <td width="50%"><a href="docs/images/window-connection.png"><img src="docs/images/window-connection.png" alt="The Connection tab"></a></td>
+    <td width="50%"><a href="docs/images/window-packets.png"><img src="docs/images/window-packets.png" alt="The Packets tab"></a></td>
+  </tr>
+  <tr>
+    <td align="center">Connection</td>
+    <td align="center">Packets</td>
+  </tr>
+  <tr>
+    <td width="50%"><a href="docs/images/window-builder.png"><img src="docs/images/window-builder.png" alt="The Builder tab"></a></td>
+    <td width="50%"><a href="docs/images/window-settings.png"><img src="docs/images/window-settings.png" alt="The Settings tab"></a></td>
+  </tr>
+  <tr>
+    <td align="center">Builder</td>
+    <td align="center">Settings</td>
+  </tr>
+</table>
 
-It needs [Node.js](https://nodejs.org) and [Tauri's prerequisites](https://tauri.app/start/prerequisites/) (on Windows, that's the WebView2 runtime, which Windows 10 and 11 already have). Then:
+The screenshots show the made-up session from `npm run dev`, not a real game.
+
+The window needs [Node.js](https://nodejs.org) and [Tauri's prerequisites](https://tauri.app/start/prerequisites/) (on Windows, that's the WebView2 runtime, which Windows 10 and 11 already have). Then:
 
 ```bash
 cd gui
