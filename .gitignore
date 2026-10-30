@@ -1,2 +1,4 @@
 /target
 /logs
+*.secret
+/automation/node_modules/

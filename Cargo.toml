@@ -17,3 +17,8 @@ serde_json = "1.0.100"
 termcolor = "1.2.0"
 byteorder = "1.4.3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+base64 = "0.22.1"
+hkdf = "0.12.4"
+sha2 = "0.10.9"
+chacha20 = { version = "0.9.1", features = ["zeroize"] }
+zeroize = "1.8.1"

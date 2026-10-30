@@ -1,0 +1,17 @@
+{
+  "name": "hablog-origins-observer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local, read-only Origins crypto-boundary observer companion",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check host.mjs && node --check origins-agent.cjs"
+  },
+  "dependencies": {
+    "frida": "17.22.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -33,10 +33,7 @@ impl ConsoleLogger {
         let mut stdout = StandardStream::stdout(ColorChoice::Always);
         Self::print_timestamp(&mut stdout);
         let log_prefix = format!("[{}]", packet.direction.short());
-        let direction_color = match packet.direction {
-            Direction::ServerToClient => Color::Red,
-            Direction::ClientToServer => Color::Magenta,
-        };
+        let direction_color = direction_color(packet.direction);
         let header = format!("[{}]", packet.get_header());
         let name = format!("[{}]", packet.name.unwrap_or_default());
 
@@ -73,6 +70,49 @@ impl ConsoleLogger {
             let body = String::from_utf8_lossy(data).trim().to_string();
             body.chars().filter(|c| !c.is_control()).collect::<String>()
         }
+    }
+
+    /// One relayed TCP chunk, for traffic Hablog doesn't split into packets.
+    pub fn log_chunk(direction: Direction, bytes: &[u8]) {
+        let mut stdout = StandardStream::stdout(ColorChoice::Always);
+        Self::print_timestamp(&mut stdout);
+        Self::print_segment(
+            &mut stdout,
+            format!("[{}]", direction.short()),
+            direction_color(direction),
+        );
+        Self::print_segment(
+            &mut stdout,
+            format!("[wire {} B]", bytes.len()),
+            Color::Cyan,
+        );
+        writeln!(&mut stdout, "[{}]", escaped(bytes, 64)).unwrap();
+    }
+
+    /// One decrypted operation reported by the Origins observer.
+    pub fn log_decrypted(direction: Direction, kind: &str, sequence: &str, plaintext: &[u8]) {
+        let mut stdout = StandardStream::stdout(ColorChoice::Always);
+        Self::print_timestamp(&mut stdout);
+        Self::print_segment(
+            &mut stdout,
+            format!("[{}]", direction.short()),
+            direction_color(direction),
+        );
+        Self::print_segment(&mut stdout, format!("[{kind} #{sequence}]"), Color::Cyan);
+        Self::print_segment(
+            &mut stdout,
+            format!("[{}]", escaped(plaintext, 4096)),
+            Color::Green,
+        );
+        writeln!(&mut stdout).unwrap();
+    }
+
+    fn print_segment(stdout: &mut StandardStream, text: String, color: Color) {
+        stdout
+            .set_color(ColorSpec::new().set_bold(true).set_fg(Some(color)))
+            .unwrap();
+        write!(stdout, "{}", text).unwrap();
+        stdout.set_color(&ColorSpec::new().set_reset(true)).unwrap();
     }
 
     pub fn info<T: Display>(message: T) {
@@ -188,4 +228,30 @@ impl ConsoleLogger {
     pub fn normal<T: Display>(message: T) {
         Self::print_log("", message, Color::White);
     }
+}
+
+fn direction_color(direction: Direction) -> Color {
+    match direction {
+        Direction::ServerToClient => Color::Red,
+        Direction::ClientToServer => Color::Magenta,
+    }
+}
+
+/// Printable ASCII as is, everything else escaped, cut off after `limit` bytes.
+pub fn escaped(bytes: &[u8], limit: usize) -> String {
+    let mut result = String::new();
+    for &byte in bytes.iter().take(limit) {
+        match byte {
+            b'\n' => result.push_str("\\n"),
+            b'\r' => result.push_str("\\r"),
+            b'\t' => result.push_str("\\t"),
+            b'\\' => result.push_str("\\\\"),
+            32..=126 => result.push(byte as char),
+            _ => result.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    if bytes.len() > limit {
+        result.push_str(&format!(" … {} more bytes", bytes.len() - limit));
+    }
+    result
 }
