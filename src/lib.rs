@@ -9,5 +9,7 @@ pub mod origins {
     pub mod routing;
 }
 pub mod proxy;
+pub mod session;
 pub mod settings;
+pub mod tools;
 pub mod wsl;

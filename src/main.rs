@@ -1,21 +1,14 @@
-use chrono::Local;
-use hablog::capture::CaptureWriter;
-use hablog::logger::{from_readable, readable, ConsoleLogger};
+use hablog::logger::{readable, ConsoleLogger};
 use hablog::model::Direction;
 use hablog::origins::crypto::{self, OriginsSession, StreamKind};
-use hablog::origins::discovery::{self, DiscoverySnapshot, ObservedEndpoint};
-use hablog::origins::fuse;
-use hablog::origins::observer::{
-    self, LocateError, ObserverConfig, ObserverEvent, ObserverHandle, ObserverRuntime,
-};
-use hablog::origins::routing::RoutePlan;
-use hablog::proxy::{ProxyConfig, ProxyEvent, ProxyHandle};
+use hablog::origins::discovery;
+use hablog::origins::observer::{self, LocateError, ObserverRuntime};
+use hablog::session::{self, Level, RawKind, SessionEvent};
 use hablog::settings::{self, Settings, Show, Source};
+use hablog::tools;
 use hablog::wsl;
 use std::io::{BufRead, IsTerminal, Write};
-use std::path::{Path, PathBuf};
-use tokio::process::Child;
-use tokio::sync::mpsc;
+use std::path::Path;
 use zeroize::Zeroizing;
 
 const HELP: &str = "\
@@ -35,7 +28,7 @@ Settings are in hablog.toml, which Hablog creates with an explanation of every
 option the first time it runs.";
 
 const SESSION_KEY_FILE: &str = "session.secret";
-// Relay events handled per console/capture write.
+// Session events printed per console write.
 const EVENT_BATCH: usize = 256;
 
 #[tokio::main]
@@ -86,193 +79,63 @@ async fn run() {
         }
     };
 
-    let snapshot = discovery::discover_with(
-        settings.advanced.appdata.clone(),
-        settings.advanced.local_appdata.clone(),
-    );
-    let mut plan = match RoutePlan::from_discovery(&snapshot, settings.server_code()) {
-        Ok(plan) => plan,
-        Err(e) => {
-            for warning in &snapshot.warnings {
-                ConsoleLogger::warning(warning);
-            }
-            ConsoleLogger::error(e);
-            ConsoleLogger::info(if snapshot.profile_root.is_some() {
-                "Open Origins once through the Habbo Launcher so it's installed, then run Hablog again."
-            } else if wsl::detected() {
-                "Hablog couldn't find Windows' AppData folder from WSL. Set appdata and local_appdata under [advanced] in hablog.toml, for example '/mnt/c/Users/you/AppData/Roaming'."
-            } else if cfg!(windows) {
-                "Install Origins with the Habbo Launcher and open it once, then run Hablog again."
-            } else {
-                "Origins is a Windows game. Set appdata and local_appdata under [advanced] in hablog.toml to a Windows AppData folder, for example inside a Wine prefix."
-            });
-            std::process::exit(1);
-        }
+    let prepared = match session::prepare(&settings) {
+        Ok(prepared) => prepared,
+        Err(problem) => fail(problem),
     };
-    if let Some(upstream) = &settings.advanced.upstream {
-        plan.upstream = upstream.clone();
-    }
     ConsoleLogger::info(format!(
         "Found Origins {} ({}), game server {}",
-        snapshot
-            .installations
-            .first()
-            .map_or("?", |installation| installation.version.as_str()),
-        plan.server_code.as_deref().unwrap_or("unknown hotel"),
-        plan.upstream
+        prepared.version(),
+        prepared
+            .plan
+            .server_code
+            .as_deref()
+            .unwrap_or("unknown hotel"),
+        prepared.plan.upstream
     ));
-    if !snapshot.running_clients.is_empty() {
+    if !prepared.snapshot.running_clients.is_empty() {
         ConsoleLogger::warning(
             "Origins is already open and connected directly. Close it so its traffic goes through Hablog.",
         );
     }
-
-    let (proxy, events) = match ProxyHandle::start(ProxyConfig {
-        listen: plan.listen.clone(),
-        upstream: plan.upstream.clone(),
-    })
-    .await
-    {
-        Ok(started) => started,
-        Err(e) => {
-            ConsoleLogger::error(e);
-            ConsoleLogger::info("Is Hablog already running?");
-            std::process::exit(1);
-        }
-    };
-    let routed = match plan.write_patched_projector() {
-        Ok(path) => path,
-        Err(e) => {
-            ConsoleLogger::error(e);
-            std::process::exit(1);
-        }
-    };
-    let game = if settings.launch {
-        start_game(&settings, &plan, &routed).await
+    let observer = if settings.launch && settings.decrypt {
+        observer_runtime(settings.advanced.observer.as_deref()).await
     } else {
-        ConsoleLogger::info(format!("Start {} to play through Hablog.", shown(&routed)));
-        Game::Manual
+        None
     };
-    let log = TrafficLog::new(settings, plan.upstream);
-    relay_loop(proxy, events, game, log).await;
-}
 
-/// The game Hablog is relaying for, and how to tell when it closes.
-enum Game {
-    /// Started by the user; Hablog runs until Ctrl+C.
-    Manual,
-    /// Started by Hablog; Hablog stops when it closes.
-    Direct(Child),
-    Observed(Observed),
-    /// Closed, or no longer tracked.
-    Ended,
-}
-
-struct Observed {
-    handle: ObserverHandle,
-    events: mpsc::Receiver<ObserverEvent>,
-    spawned: bool,
-    routed: PathBuf,
-}
-
-enum GameEvent {
-    Closed,
-    Observer(ObserverEvent),
-}
-
-impl Game {
-    async fn next(&mut self) -> GameEvent {
-        match self {
-            Game::Direct(child) => {
-                let _ = child.wait().await;
-                GameEvent::Closed
-            }
-            Game::Observed(observed) => GameEvent::Observer(
-                observed
-                    .events
-                    .recv()
-                    .await
-                    .unwrap_or(ObserverEvent::Exited),
-            ),
-            Game::Manual | Game::Ended => std::future::pending().await,
-        }
-    }
-
-    /// Detaches the observer, if any. The game itself is left running.
-    async fn stop(&mut self) {
-        if let Game::Observed(observed) = self {
-            observed.handle.stop().await;
-        }
-        *self = Game::Ended;
-    }
-}
-
-async fn start_game(settings: &Settings, plan: &RoutePlan, routed: &Path) -> Game {
-    if settings.decrypt {
-        if let Some(runtime) = observer_runtime(settings.advanced.observer.as_deref()).await {
-            ConsoleLogger::info("Starting the game with decrypted traffic...");
-            match ObserverHandle::start(ObserverConfig {
-                node_exe: runtime.node_exe,
-                host_script: runtime.host_script,
-                client_exe: routed.to_path_buf(),
-                module_path: plan.module_path.clone(),
-                launch: true,
-                argv: Vec::new(),
-            })
-            .await
-            {
-                Ok((handle, events)) => {
-                    return Game::Observed(Observed {
-                        handle,
-                        events,
-                        spawned: false,
-                        routed: routed.to_path_buf(),
-                    })
+    let (handle, mut events) = match session::start(settings.clone(), prepared, observer).await {
+        Ok(started) => started,
+        Err(problem) => fail(problem),
+    };
+    let mut console = Console::new(settings);
+    let mut signals = ShutdownSignals::new();
+    let mut batch = Vec::with_capacity(EVENT_BATCH);
+    loop {
+        tokio::select! {
+            received = events.recv_many(&mut batch, EVENT_BATCH) => {
+                if received == 0 {
+                    break;
                 }
-                Err(e) => ConsoleLogger::warning(format!(
-                    "{e}. Starting the game without decrypted traffic."
-                )),
+                for event in batch.drain(..) {
+                    console.show(event);
+                }
+                ConsoleLogger::flush();
             }
-        }
-    }
-    launch_direct(routed)
-}
-
-fn launch_direct(routed: &Path) -> Game {
-    if !wsl::runs_windows_programs() {
-        ConsoleLogger::info(format!(
-            "Origins runs on Windows: start {} there to play through Hablog.",
-            routed.display()
-        ));
-        return Game::Manual;
-    }
-    // Under WSL, interop runs the Windows program and this child stands in
-    // for it until it exits.
-    let mut command = tokio::process::Command::new(routed);
-    if let Some(parent) = routed.parent() {
-        command.current_dir(parent);
-    }
-    match command.spawn() {
-        Ok(child) => {
-            ConsoleLogger::success("Started the game.");
-            Game::Direct(child)
-        }
-        Err(e) => {
-            ConsoleLogger::error(format!("Cannot start {}: {e}", shown(routed)));
-            ConsoleLogger::info("Start it yourself to play through Hablog.");
-            Game::Manual
+            _ = signals.recv() => handle.stop(),
         }
     }
 }
 
-/// A path as the user would type it into Windows: under WSL, the Windows form.
-fn shown(path: &Path) -> String {
-    wsl::detected()
-        .then(|| wsl::to_windows(path))
-        .flatten()
-        .unwrap_or_else(|| path.to_path_buf())
-        .display()
-        .to_string()
+fn fail(problem: session::Problem) -> ! {
+    for warning in &problem.warnings {
+        ConsoleLogger::warning(warning);
+    }
+    ConsoleLogger::error(problem.error);
+    if let Some(hint) = problem.hint {
+        ConsoleLogger::info(hint);
+    }
+    std::process::exit(1);
 }
 
 /// Finds the observer, offering to install its dependencies the first time.
@@ -317,103 +180,98 @@ async fn observer_runtime(dir: Option<&Path>) -> Option<ObserverRuntime> {
     }
 }
 
-async fn relay_loop(
-    proxy: ProxyHandle,
-    mut events: mpsc::Receiver<ProxyEvent>,
-    mut game: Game,
-    mut log: TrafficLog,
-) {
-    let mut signals = ShutdownSignals::new();
-    let mut stopping = false;
-    let mut batch = Vec::with_capacity(EVENT_BATCH);
-    let stop = |stopping: &mut bool, message: &str| {
-        if !*stopping {
-            *stopping = true;
-            ConsoleLogger::normal(message);
-            // Keep draining events so the final traffic and the disconnect
-            // are still logged.
-            proxy.shutdown();
+/// Prints session events, following the `show` settings.
+struct Console {
+    settings: Settings,
+    /// The observer is reporting decrypted messages, so the encrypted chunks
+    /// they came in are only shown with `show_raw`.
+    decrypting: bool,
+}
+
+impl Console {
+    fn new(settings: Settings) -> Self {
+        Console {
+            settings,
+            decrypting: false,
         }
-    };
-    loop {
-        tokio::select! {
-            received = events.recv_many(&mut batch, EVENT_BATCH) => {
-                if received == 0 {
-                    break;
-                }
-                let mut stopped = false;
-                for event in batch.drain(..) {
-                    match event {
-                        ProxyEvent::Listening { address } => log.listening(&address),
-                        ProxyEvent::Connected { peer, upstream } => log.connected(&peer, &upstream),
-                        ProxyEvent::Data { direction, bytes } => log.data(direction, &bytes),
-                        ProxyEvent::Disconnected => log.disconnected(),
-                        ProxyEvent::Error(error) => ConsoleLogger::error(error),
-                        ProxyEvent::Stopped => stopped = true,
-                    }
-                }
-                if stopped {
-                    break;
-                }
-            }
-            event = game.next() => match event {
-                GameEvent::Closed => {
-                    game = Game::Ended;
-                    stop(&mut stopping, "The game closed. Stopping Hablog...");
-                }
-                GameEvent::Observer(ObserverEvent::Spawned) => {
-                    if let Game::Observed(observed) = &mut game {
-                        observed.spawned = true;
-                    }
-                }
-                GameEvent::Observer(ObserverEvent::Detached { reason }) if reason == "process-terminated" => {
-                    game.stop().await;
-                    stop(&mut stopping, "The game closed. Stopping Hablog...");
-                }
-                GameEvent::Observer(event @ (ObserverEvent::Error(_) | ObserverEvent::Exited)) => {
-                    let unstarted = match &game {
-                        Game::Observed(observed) if !observed.spawned => Some(observed.routed.clone()),
-                        _ => None,
-                    };
-                    match unstarted {
-                        // The observer failed before the game existed, so
-                        // start it without decrypted traffic instead.
-                        Some(routed) => {
-                            ConsoleLogger::warning(match event {
-                                ObserverEvent::Error(error) => format!(
-                                    "Decrypted traffic isn't available ({error}). Starting the game normally."
-                                ),
-                                _ => "The observer stopped before starting the game. Starting it normally.".into(),
-                            });
-                            game.stop().await;
-                            game = launch_direct(&routed);
-                        }
-                        None => {
-                            let exited = matches!(event, ObserverEvent::Exited);
-                            log.observer(event);
-                            if exited {
-                                // The game keeps running unobserved; Hablog
-                                // can no longer tell when it closes.
-                                game.stop().await;
-                            }
-                        }
-                    }
-                }
-                GameEvent::Observer(event) => log.observer(event),
-            },
-            _ = signals.recv() => {
-                if stopping {
-                    ConsoleLogger::warning("Stopping immediately.");
-                    break;
-                }
-                stop(&mut stopping, "Stopping Hablog. The game stays open but loses its connection...");
-            }
-        }
-        log.flush();
     }
-    log.flush();
-    game.stop().await;
-    ConsoleLogger::normal("Stopped.");
+
+    fn show(&mut self, event: SessionEvent) {
+        match event {
+            SessionEvent::Status { level, text } => match level {
+                Level::Normal => ConsoleLogger::normal(text),
+                Level::Info => ConsoleLogger::info(text),
+                Level::Success => ConsoleLogger::success(text),
+                Level::Warning => ConsoleLogger::warning(text),
+                Level::Error => ConsoleLogger::error(text),
+            },
+            SessionEvent::Ready { listen, upstream } => {
+                ConsoleLogger::info(format!("Relay ready on {listen}, forwarding to {upstream}"));
+                if self.settings.show != Show::None {
+                    ConsoleLogger::normal(
+                        "Each message is one line: direction, header, ID and body, with unprintable bytes as [n].",
+                    );
+                }
+            }
+            SessionEvent::Connected {
+                peer,
+                upstream,
+                capture,
+            } => {
+                ConsoleLogger::success(format!(
+                    "The game connected ({peer}), relaying to {upstream}"
+                ));
+                if let Some(path) = capture {
+                    ConsoleLogger::info(format!("Saving traffic to {path}"));
+                }
+            }
+            SessionEvent::Disconnected { capture, chunks } => match capture {
+                Some(path) => ConsoleLogger::normal(format!(
+                    "The game disconnected. Saved {chunks} TCP chunks to {path}"
+                )),
+                None => ConsoleLogger::normal("The game disconnected."),
+            },
+            SessionEvent::Decrypting { on } => self.decrypting = on,
+            SessionEvent::Message {
+                direction, bytes, ..
+            } => {
+                if self.settings.shows(direction) {
+                    let (header, body) = bytes.split_at(bytes.len().min(2));
+                    ConsoleLogger::log_message(
+                        direction,
+                        header,
+                        hablog::origins::fuse::id(&bytes),
+                        body,
+                    );
+                }
+            }
+            SessionEvent::Raw {
+                direction,
+                raw,
+                bytes,
+                plain,
+                ..
+            } => {
+                // Without decrypted traffic, the encrypted chunks are all
+                // there is to show.
+                let fallback = raw == RawKind::Wire && !plain && !self.decrypting;
+                if self.settings.shows(direction) && (self.settings.show_raw || fallback) {
+                    let label = match raw {
+                        RawKind::Wire => "wire",
+                        RawKind::Frame => "frame",
+                    };
+                    ConsoleLogger::log_raw(direction, label, &bytes);
+                }
+            }
+            SessionEvent::Connecting { host, port } => {
+                if self.settings.show_raw {
+                    ConsoleLogger::normal(format!("The game is connecting to {host}:{port}."));
+                }
+            }
+            SessionEvent::Traffic { .. } => {}
+            SessionEvent::Stopped => ConsoleLogger::normal("Stopped."),
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -464,178 +322,6 @@ impl ShutdownSignals {
     }
 }
 
-/// The console log and capture file for the current game session.
-struct TrafficLog {
-    settings: Settings,
-    upstream: String,
-    sessions: u64,
-    capture: Option<CaptureWriter>,
-    /// The observer is reporting decrypted messages, so the encrypted chunks
-    /// they came in are only shown with `show_raw`.
-    decrypting: bool,
-}
-
-impl TrafficLog {
-    fn new(settings: Settings, upstream: String) -> Self {
-        TrafficLog {
-            settings,
-            upstream,
-            sessions: 0,
-            capture: None,
-            decrypting: false,
-        }
-    }
-
-    fn listening(&self, address: &str) {
-        ConsoleLogger::info(format!(
-            "Relay ready on {address}, forwarding to {}",
-            self.upstream
-        ));
-        if self.settings.show != Show::None {
-            ConsoleLogger::normal(
-                "Each message is one line: direction, header, ID and body, with unprintable bytes as [n].",
-            );
-        }
-    }
-
-    fn connected(&mut self, peer: &str, upstream: &str) {
-        self.sessions += 1;
-        ConsoleLogger::success(format!(
-            "The game connected ({peer}), relaying to {upstream}"
-        ));
-        if let Some(dir) = self.settings.captures() {
-            let path = dir.join(format!(
-                "hablog-{}-{}.jsonl",
-                Local::now().format("%Y%m%d-%H%M%S"),
-                self.sessions
-            ));
-            match CaptureWriter::create(&path, peer, upstream) {
-                Ok(capture) => {
-                    ConsoleLogger::info(format!("Saving traffic to {}", path.display()));
-                    self.capture = Some(capture);
-                }
-                Err(e) => ConsoleLogger::error(e),
-            }
-        }
-    }
-
-    fn data(&mut self, direction: Direction, bytes: &[u8]) {
-        if let Some(capture) = self.capture.as_mut() {
-            if let Err(e) = capture.record(direction, bytes) {
-                ConsoleLogger::error(format!("{e}. Saving stopped for this session."));
-                self.capture = None;
-            }
-        }
-        if !self.settings.shows(direction) {
-            return;
-        }
-        let plain = fuse::plain_messages(direction, bytes);
-        if self.settings.show_raw || (plain.is_none() && !self.decrypting) {
-            ConsoleLogger::log_raw(direction, "wire", bytes);
-        }
-        // Before encryption starts, the handshake travels as plain messages.
-        for message in plain.unwrap_or_default() {
-            print_message(direction, message);
-        }
-    }
-
-    fn disconnected(&mut self) {
-        match self.capture.take() {
-            Some(mut capture) => {
-                if let Err(e) = capture.flush() {
-                    ConsoleLogger::error(e);
-                }
-                ConsoleLogger::normal(format!(
-                    "The game disconnected. Saved {} TCP chunks to {}",
-                    capture.records(),
-                    capture.path().display()
-                ))
-            }
-            None => ConsoleLogger::normal("The game disconnected."),
-        }
-    }
-
-    fn observer(&mut self, event: ObserverEvent) {
-        match event {
-            ObserverEvent::Status { state, detail } => match state.as_str() {
-                "observing" => {
-                    self.decrypting = true;
-                    ConsoleLogger::success("Decrypted traffic is on.");
-                }
-                "client_resumed" => ConsoleLogger::success("Started the game."),
-                "signature_mismatch_proceeding" => ConsoleLogger::warning(format!(
-                    "The game's crypto module differs from the verified one ({detail}); decrypting anyway."
-                )),
-                "module_unloaded" => {
-                    ConsoleLogger::warning("The game unloaded its crypto module.")
-                }
-                _ => {}
-            },
-            ObserverEvent::Crypto(op) => {
-                if !self.settings.shows(op.direction) {
-                    return;
-                }
-                // Metadata-only operations carry no bytes.
-                match op.plaintext_hex().map(hex::decode) {
-                    Some(Ok(plaintext)) if op.kind == "payload" => {
-                        for message in fuse::split_payload(op.direction, &plaintext) {
-                            print_message(op.direction, message);
-                        }
-                    }
-                    // The frame header only carries the payload's length.
-                    Some(Ok(plaintext)) => {
-                        if self.settings.show_raw {
-                            ConsoleLogger::log_raw(op.direction, "frame", &plaintext);
-                        }
-                    }
-                    Some(Err(_)) => ConsoleLogger::warning(format!(
-                        "The observer sent unreadable bytes for {} #{}",
-                        op.operation, op.sequence
-                    )),
-                    None => {}
-                }
-            }
-            ObserverEvent::SocketConnect { host, port, .. } => {
-                if self.settings.show_raw {
-                    ConsoleLogger::normal(format!("The game is connecting to {host}:{port}."));
-                }
-            }
-            ObserverEvent::Dropped(count) => ConsoleLogger::warning(format!(
-                "The observer skipped {count} operations because its buffer was full."
-            )),
-            ObserverEvent::Error(error) => ConsoleLogger::error(format!("Observer: {error}")),
-            ObserverEvent::Detached { .. } | ObserverEvent::Exited => {
-                self.decrypting = false;
-                ConsoleLogger::warning(
-                    "The observer stopped, so decrypted traffic is no longer shown.",
-                )
-            }
-            ObserverEvent::Spawned => {}
-        }
-    }
-
-    /// Writes the batch's console lines and capture records.
-    fn flush(&mut self) {
-        if let Some(capture) = self.capture.as_mut() {
-            if let Err(e) = capture.flush() {
-                ConsoleLogger::error(format!("{e}. Saving stopped for this session."));
-                self.capture = None;
-            }
-        }
-        ConsoleLogger::flush();
-    }
-}
-
-/// One message as a row. Logs get shared, so the login password is masked.
-fn print_message(direction: Direction, message: &[u8]) {
-    let masked = (direction == Direction::ClientToServer)
-        .then(|| fuse::mask_login_password(message))
-        .flatten();
-    let message = masked.as_deref().unwrap_or(message);
-    let (header, body) = message.split_at(message.len().min(2));
-    ConsoleLogger::log_message(direction, header, fuse::id(message), body);
-}
-
 fn details_command() {
     let settings = match Settings::load(Path::new(settings::FILE_NAME)) {
         Ok(settings) => settings,
@@ -646,7 +332,7 @@ fn details_command() {
     };
     let snapshot =
         discovery::discover_with(settings.advanced.appdata, settings.advanced.local_appdata);
-    for line in details(&snapshot) {
+    for line in tools::details(&snapshot) {
         println!("{line}");
     }
     for warning in &snapshot.warnings {
@@ -654,297 +340,49 @@ fn details_command() {
     }
 }
 
-/// The discovered launcher, installations, endpoints and running clients.
-fn details(snapshot: &DiscoverySnapshot) -> Vec<String> {
-    let mut lines = Vec::new();
-    if let Some(launcher) = &snapshot.launcher_executable {
-        lines.push(format!(
-            "Launcher: {} (version {})",
-            launcher.display(),
-            snapshot.launcher_version.as_deref().unwrap_or("unknown")
-        ));
-    }
-    if let Some(profile) = &snapshot.profile_root {
-        lines.push(format!("Launcher profile: {}", profile.display()));
-    }
-    if let Some(version) = &snapshot.preferred_version {
-        lines.push(format!("Launcher's selected version: {version}"));
-    }
-    if snapshot.installations.is_empty() {
-        lines.push("No Origins installation was found.".into());
-    }
-    for installation in &snapshot.installations {
-        lines.push(format!(
-            "Origins {} at {}{}",
-            installation.version,
-            installation.root.display(),
-            if installation.registered {
-                ""
-            } else {
-                " (not registered with the launcher)"
-            }
-        ));
-        match &installation.current_default_executable {
-            Some(_) => lines.push(format!(
-                "  Habbo.exe:  game {} ({})",
-                endpoint_text(installation.current_default_info_endpoint.as_ref()),
-                installation
-                    .current_default_server_code
-                    .as_deref()
-                    .unwrap_or("unknown hotel")
-            )),
-            None => lines.push("  Habbo.exe:  missing".into()),
-        }
-        for regional in &installation.regional_executables {
-            lines.push(format!(
-                "  {:<9} game {}, MUS {}  ({})",
-                format!(
-                    "{}{}",
-                    regional.server_code,
-                    if regional.large { " XL" } else { "" }
-                ),
-                endpoint_text(regional.info_endpoint.as_ref()),
-                endpoint_text(regional.mus_endpoint.as_ref()),
-                regional
-                    .path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-            ));
-            if let Some(site) = &regional.site_url {
-                lines.push(format!("            site {}", site.value));
-            }
-            if let Some(variables) = &regional.external_variables_url {
-                lines.push(format!(
-                    "            external variables {}",
-                    variables.value
-                ));
-            }
-        }
-    }
-    for client in &snapshot.running_clients {
-        lines.push(format!(
-            "Running client: pid {} {} ({})",
-            client.pid,
-            client.path.display(),
-            client.server_code.as_deref().unwrap_or("unknown hotel")
-        ));
-    }
-    lines
-}
-
-fn endpoint_text(endpoint: Option<&ObservedEndpoint>) -> String {
-    endpoint.map_or_else(
-        || "unknown".into(),
-        |endpoint| format!("{}:{}", endpoint.host, endpoint.port),
-    )
-}
-
 /// Decodes `value`, or each value typed at the prompt when it is empty.
 fn decode_command(value: &str) {
     if !value.is_empty() {
-        for line in decode(value) {
+        for line in tools::decode(value) {
             println!("{line}");
         }
         return;
     }
     println!("Paste a value from the log, or type a number. Press Enter on an empty line to quit.");
     while let Some(value) = ask("Value", "").filter(|value| !value.is_empty()) {
-        for line in decode(&value) {
+        for line in tools::decode(&value) {
             println!("  {line}");
         }
     }
 }
 
-/// What `value` means as FUSE numbers. A number is encoded instead.
-fn decode(value: &str) -> Vec<String> {
-    let value = value.trim();
-    if let Ok(number) = value.parse::<i32>() {
-        let mut lines = vec![format!(
-            "VL64: {}",
-            readable(&fuse::vl64_encode(number), usize::MAX)
-        )];
-        let b64: Vec<String> = usize::try_from(number)
-            .ok()
-            .into_iter()
-            .flat_map(|number| {
-                [
-                    (2, "a header or string length"),
-                    (3, "a client message length"),
-                ]
-                .into_iter()
-                .filter_map(move |(digits, use_)| {
-                    let encoded = fuse::b64_encode(number, digits)?;
-                    Some(format!("{} ({use_})", readable(&encoded, usize::MAX)))
-                })
-            })
-            .collect();
-        lines.push(if b64.is_empty() {
-            "B64:  doesn't fit".into()
-        } else {
-            format!("B64:  {}", b64.join(", "))
-        });
-        return lines;
-    }
-
-    let bytes = from_readable(value);
-    let mut lines = Vec::new();
-    // VL64 numbers usually come one after another; reading stops at the
-    // first byte that can't be part of one, such as a [2]. Lowercase letters
-    // are valid VL64 too, but four or more in a row are a word, not a number.
-    let mut rest = &bytes[..];
-    let mut numbers = Vec::new();
-    while let Some((number, after)) = fuse::vl64(rest) {
-        let used = &rest[..rest.len() - after.len()];
-        if used.len() >= 4 && used.iter().all(|&b| b.is_ascii_lowercase() || b == b'_') {
-            break;
-        }
-        numbers.push(format!("{} = {number}", readable(used, usize::MAX)));
-        rest = after;
-    }
-    lines.push(match (numbers.is_empty(), rest.is_empty()) {
-        (true, _) => "VL64: not a VL64 number".into(),
-        (false, true) => format!("VL64: {}", numbers.join(", ")),
-        (false, false) => format!(
-            "VL64: {}, then {}",
-            numbers.join(", "),
-            readable(rest, usize::MAX)
-        ),
-    });
-    lines.push(match bytes.len() {
-        2 | 3 => match fuse::b64(&bytes, bytes.len()) {
-            Some((number, _)) => format!("B64:  {number}"),
-            None => "B64:  not a B64 number".into(),
-        },
-        // A client string: its length in two B64 characters, then the text.
-        _ => match fuse::b64(&bytes, 2).filter(|(length, after)| *length <= after.len()) {
-            Some((length, after)) if bytes.len() > 3 => {
-                let text = readable(&after[..length], usize::MAX);
-                if after.len() == length {
-                    format!("B64:  a {length}-character string: {text}")
-                } else {
-                    format!(
-                        "B64:  a {length}-character string: {text}, then {}",
-                        readable(&after[length..], usize::MAX)
-                    )
-                }
-            }
-            _ => "B64:  not a B64 number or string".into(),
-        },
-    });
-    lines
-}
-
-const BUILD_HELP: &str = "\
-Start with the header, as in the log (@C) or as its ID (3), then the values:
-  i:5        a number (VL64)
-  b:true     a boolean, true/false or 1/0 (VL64 I/H)
-  s:text     a string; ends with [2] for the client, carries its length for the server
-  r:text     raw bytes, exactly as written
-A space followed by another i:, b:, s: or r: starts the next value, so text can
-contain spaces. [n] is byte n, as in the log. A message is built as the server
-sends it to the game; start with `out` for one the game sends.";
-
 /// Builds the message described by `spec`, or each one typed at the prompt.
 fn build_command(spec: &str) {
     if !spec.is_empty() {
-        match build(spec) {
-            Ok(lines) => lines.iter().for_each(|line| println!("{line}")),
+        match tools::build(spec) {
+            Ok(message) => print_built(&message, ""),
             Err(e) => {
-                eprintln!("{e}\n\n{BUILD_HELP}");
+                eprintln!("{e}\n\n{}", tools::BUILD_HELP);
                 std::process::exit(2);
             }
         }
         return;
     }
-    println!("{BUILD_HELP}\n\nPress Enter on an empty line to quit.");
+    println!(
+        "{}\n\nPress Enter on an empty line to quit.",
+        tools::BUILD_HELP
+    );
     while let Some(spec) = ask("Message", "").filter(|spec| !spec.is_empty()) {
-        match build(&spec) {
-            Ok(lines) => lines.iter().for_each(|line| println!("  {line}")),
+        match tools::build(&spec) {
+            Ok(message) => print_built(&message, "  "),
             Err(e) => println!("  {e}"),
         }
     }
 }
 
-/// The message described by `spec` in log notation, and as hex.
-fn build(spec: &str) -> Result<[String; 2], String> {
-    let words: Vec<&str> = spec.split(' ').collect();
-    let mut index = 0;
-    let missing = "The header is missing.";
-    let mut direction = Direction::ServerToClient;
-    let mut header = next_word(&words, &mut index).ok_or(missing)?;
-    match header.to_ascii_lowercase().as_str() {
-        "out" => {
-            direction = Direction::ClientToServer;
-            header = next_word(&words, &mut index).ok_or(missing)?;
-        }
-        "in" => header = next_word(&words, &mut index).ok_or(missing)?,
-        _ => {}
-    }
-    let header =
-        match header.parse::<u16>() {
-            Ok(id) => id,
-            Err(_) => {
-                let bytes = from_readable(header);
-                fuse::id(&bytes).filter(|_| bytes.len() == 2).ok_or_else(|| {
-                format!("{header} is not a header; use two characters like @C, or an ID like 3.")
-            })?
-            }
-        };
-    // Values start at a word with a type; any other word continues the
-    // previous value's text after a space.
-    let mut values: Vec<(char, String)> = Vec::new();
-    for &word in &words[index..] {
-        match word.split_once(':') {
-            Some((kind @ ("i" | "b" | "s" | "r"), text)) => {
-                values.push((kind.chars().next().unwrap_or('r'), text.to_owned()))
-            }
-            _ => match values.last_mut() {
-                Some(('s' | 'r', text)) => {
-                    text.push(' ');
-                    text.push_str(word);
-                }
-                _ if word.is_empty() => {}
-                _ => {
-                    return Err(format!(
-                        "{word} has no type; write i:, b:, s: or r: before it."
-                    ))
-                }
-            },
-        }
-    }
-    let values = values
-        .into_iter()
-        .map(|(kind, text)| match kind {
-            'i' => text
-                .parse()
-                .map(fuse::Value::Int)
-                .map_err(|_| format!("i:{text} is not a whole number.")),
-            'b' => match text.to_ascii_lowercase().as_str() {
-                "true" | "1" => Ok(fuse::Value::Bool(true)),
-                "false" | "0" => Ok(fuse::Value::Bool(false)),
-                _ => Err(format!("b:{text} is not true or false.")),
-            },
-            's' => Ok(fuse::Value::Str(from_readable(&text))),
-            _ => Ok(fuse::Value::Raw(from_readable(&text))),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let message = fuse::build(direction, header, &values)?;
-    Ok([
-        readable(&message, usize::MAX),
-        format!("hex: {}", hex::encode(&message)),
-    ])
-}
-
-/// The next non-empty word from `index` on.
-fn next_word<'a>(words: &[&'a str], index: &mut usize) -> Option<&'a str> {
-    while let Some(&word) = words.get(*index) {
-        *index += 1;
-        if !word.is_empty() {
-            return Some(word);
-        }
-    }
-    None
+fn print_built(message: &[u8], indent: &str) {
+    println!("{indent}{}", readable(message, usize::MAX));
+    println!("{indent}hex: {}", hex::encode(message));
 }
 
 /// Asks for each value, remembering the previous answers as defaults.
@@ -1055,74 +493,4 @@ fn confirm(question: &str) -> bool {
         answer.trim().to_ascii_lowercase().as_str(),
         "" | "y" | "yes"
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn decodes_values_pasted_from_the_log() {
-        assert_eq!(decode("PB"), ["VL64: PB = 8", "B64:  1026"]);
-        assert_eq!(
-            decode("PBfuse_login[2]fuse_trade[2]")[0],
-            "VL64: PB = 8, then fuse_login[2]fuse_trade[2]"
-        );
-        assert_eq!(
-            decode("RAHHIIKHJHPAIQAdd-MM-yyyy[2][1]")[0],
-            "VL64: RA = 6, H = 0, H = 0, I = 1, I = 1, K = 3, H = 0, J = 2, H = 0, PA = 4, I = 1, QA = 5, then dd-MM-yyyy[2][1]"
-        );
-        assert_eq!(decode("CN"), ["VL64: not a VL64 number", "B64:  206"]);
-        assert_eq!(
-            decode("@Jclub_habbo")[1],
-            "B64:  a 10-character string: club_habbo"
-        );
-    }
-
-    #[test]
-    fn builds_messages_from_typed_values() {
-        assert_eq!(
-            build("@C b:true b:false i:0").unwrap(),
-            ["@CIHH[1]", "hex: 404349484801"]
-        );
-        assert_eq!(
-            build("3 s:hello world i:2").unwrap()[0],
-            "@Chello world[2]J[1]"
-        );
-        assert_eq!(build("in @F r:35.0").unwrap()[0], "@F35.0[1]");
-        assert_eq!(build("out  @Z s:club_habbo").unwrap()[0], "@Z@Jclub_habbo");
-        assert_eq!(build("@B r:a[9]b[13]").unwrap()[0], "@Ba[9]b[13][1]");
-        // What decode reads back.
-        assert_eq!(
-            decode("PBfuse_login[2][1]")[0],
-            "VL64: PB = 8, then fuse_login[2][1]"
-        );
-        assert_eq!(
-            build("@B i:8 s:fuse_login").unwrap()[0],
-            "@BPBfuse_login[2][1]"
-        );
-    }
-
-    #[test]
-    fn explains_what_is_wrong_with_a_message() {
-        assert!(build("").unwrap_err().contains("header is missing"));
-        assert!(build("out").unwrap_err().contains("header is missing"));
-        assert!(build("@ i:1").unwrap_err().contains("not a header"));
-        assert!(build("@C i:x").unwrap_err().contains("whole number"));
-        assert!(build("@C b:2").unwrap_err().contains("true or false"));
-        assert!(build("@C hello").unwrap_err().contains("no type"));
-        assert!(build("5000").unwrap_err().contains("too large"));
-    }
-
-    #[test]
-    fn encodes_numbers() {
-        assert_eq!(
-            decode("206"),
-            [
-                "VL64: Rs",
-                "B64:  CN (a header or string length), @CN (a client message length)"
-            ]
-        );
-        assert_eq!(decode("-1"), ["VL64: M", "B64:  doesn't fit"]);
-    }
 }

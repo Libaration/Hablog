@@ -9,6 +9,7 @@
 //! copy connects to the loopback relay while the port and everything else is
 //! unchanged. The real client, launcher and hosts file are never modified.
 
+use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,7 +19,7 @@ const HOST_KEY: &[u8] = b"connection.info.host=";
 const LOOPBACK: &[u8] = b"127.0.0.1";
 const ROUTED_NAME: &str = "Hablog-Routed.exe";
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct RoutePlan {
     /// The installed projector to copy (`Habbo.exe` or a regional client).
     pub source_exe: PathBuf,

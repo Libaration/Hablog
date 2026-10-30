@@ -102,6 +102,16 @@ pub fn on_windows_drive(path: &Path) -> bool {
     to_windows(path).is_some_and(|windows| is_windows_path(&windows.to_string_lossy()))
 }
 
+/// A path as the user would type it into Windows: under WSL, its Windows form.
+pub fn display_path(path: &Path) -> String {
+    detected()
+        .then(|| to_windows(path))
+        .flatten()
+        .unwrap_or_else(|| path.to_path_buf())
+        .display()
+        .to_string()
+}
+
 /// Image names and PIDs of the running Windows programs, from `tasklist.exe`.
 pub fn windows_processes() -> Result<Vec<(u32, String)>, String> {
     let output = Command::new("tasklist.exe")
