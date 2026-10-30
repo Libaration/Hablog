@@ -4,6 +4,7 @@ pub mod model;
 pub mod origins {
     pub mod crypto;
     pub mod discovery;
+    pub mod fuse;
     pub mod observer;
     pub mod routing;
 }

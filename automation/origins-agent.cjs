@@ -114,13 +114,28 @@
     return sessions.get(key);
   }
 
+  // The projector loads its Xtras through 8.3 short names (HABBOL~1 for
+  // "Habbo Launcher"), so expand them before comparing with the verified path.
+  function longPath(path) {
+    try {
+      const getLongPathName = new NativeFunction(
+        Process.getModuleByName('kernel32.dll').getExportByName('GetLongPathNameW'),
+        'uint32', ['pointer', 'pointer', 'uint32'], 'stdcall');
+      const size = 32768;
+      const output = Memory.alloc(size * 2);
+      const length = getLongPathName(Memory.allocUtf16String(path), output, size);
+      if (length > 0 && length < size) return output.readUtf16String(length);
+    } catch (_) { /* Compare the path as loaded. */ }
+    return path;
+  }
+
   function attachCrypto(module) {
     if (nativeModule !== null) return;
     // The client file hash was already verified as the supported build before
     // launch, so a path or in-memory signature difference (ASLR relocations,
     // loader fix-ups) is reported but does not abort hooking the verified RVAs.
     const diagnostics = [];
-    if (pathKey(module.path) !== pathKey(modulePath)) {
+    if (pathKey(longPath(module.path)) !== pathKey(modulePath)) {
       diagnostics.push('path=' + module.path);
     }
     for (const operation of OPERATIONS) {

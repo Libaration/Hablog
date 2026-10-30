@@ -50,7 +50,9 @@ The observer in [automation/](automation/README.md) starts the game through Frid
 18:15:02.114 [In][payload #12][@Bhello\x01]
 ```
 
-It needs [Node.js](https://nodejs.org) 22 or later. When it isn't installed yet, Hablog asks whether to run `npm ci` in `automation/` for you. It only supports the BobbaXtra build it was written for and refuses any other without touching the game, in which case the game starts normally. Decrypted messages are only printed, never saved, because they include what you type, such as your password.
+It needs [Node.js](https://nodejs.org) 22 or later. When it isn't installed yet, Hablog asks whether to run `npm ci` in `automation/` for you. It only supports the BobbaXtra build it was written for (client 371 still ships it) and refuses any other without touching the game, in which case the game starts normally.
+
+Decrypted messages are only printed, never saved. The password in the login message is shown as `*`s so a log can be shared, but everything else you send, such as your email address and chat, is shown as is.
 
 ## Other commands
 
@@ -95,6 +97,7 @@ A row is a TCP read, not necessarily one complete message.
 * `origins/routing.rs`: Writes the routed copy of the client.
 * `origins/observer.rs`: Runs the observer in `automation/` and reads its events.
 * `origins/crypto.rs`: The session decoder used by `hablog decrypt`.
+* `origins/fuse.rs`: Recognizes the login message so its password can be masked.
 
 ## Tests
 

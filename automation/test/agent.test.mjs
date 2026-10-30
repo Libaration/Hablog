@@ -93,7 +93,7 @@ test('sockaddr decoding uses network-order ports for IPv4 and IPv6', () => {
   assert.equal(readEndpoint(memory.ptr(0x100), 4), null);
 });
 
-function simulatedAgent({ architecture = 'ia32', loadedPath = 'C:\\client\\Xtras\\BobbaXtra.x32' } = {}) {
+function simulatedAgent({ architecture = 'ia32', loadedPath = 'C:\\client\\Xtras\\BobbaXtra.x32', longPaths = {} } = {}) {
   const memory = new Memory();
   const hooks = new Map();
   const messages = [];
@@ -105,6 +105,17 @@ function simulatedAgent({ architecture = 'ia32', loadedPath = 'C:\\client\\Xtras
       id: 987, platform: 'windows', arch: architecture, pointerSize: architecture === 'ia32' ? 4 : 8,
       codeSigningPolicy: 'optional',
       attachModuleObserver(observer) { observer.onAdded(nativeModule); return { detach() {} }; },
+      getModuleByName(name) { return { getExportByName: exportName => `${name}!${exportName}` }; },
+    },
+    // GetLongPathNameW, answering from `longPaths` (0 when there is no long form).
+    NativeFunction: function (address, returnType, argumentTypes, abi) {
+      assert.equal(address, 'kernel32.dll!GetLongPathNameW');
+      assert.equal(abi, 'stdcall');
+      return (input, output) => { output.value = longPaths[input.value] ?? ''; return output.value.length; };
+    },
+    Memory: {
+      allocUtf16String(value) { return { value }; },
+      alloc() { return { value: '', readUtf16String(length) { return this.value.slice(0, length); } }; },
     },
     Interceptor: { attach(address, callbacks) { hooks.set(address.address - 0x1000, callbacks); return { detach() {} }; } },
     send(message) { messages.push(message); },
@@ -180,6 +191,16 @@ test('architecture mismatch installs no hooks; a loaded-module path mismatch is 
   assert.ok(wrongPath.messages.flatMap(message => message.events ?? []).some(event =>
     event.state === 'signature_mismatch_proceeding' && event.detail.includes('path=C:\\unrelated\\BobbaXtra.x32')));
   assert.equal(pathKey('C:/CLIENT/Xtras/BobbaXtra.x32'), pathKey('c:\\client\\xtras\\bobbaxtra.x32'));
+});
+
+test('8.3 short module paths are expanded before comparing', () => {
+  const shortPath = 'C:\\Users\\me\\HABBOL~1\\DOWNLO~1\\SHOCKW~1\\371\\xtras\\BobbaXtra.x32';
+  const agent = simulatedAgent({ loadedPath: shortPath, longPaths: { [shortPath]: 'C:\\client\\Xtras\\BobbaXtra.x32' } });
+  agent.configure('full');
+  assert.equal(agent.hooks.size, 4);
+  const events = agent.messages.flatMap(message => message.events ?? []);
+  assert.ok(!events.some(event => event.state === 'signature_mismatch_proceeding'), JSON.stringify(events));
+  assert.ok(events.some(event => event.state === 'observing'));
 });
 
 function peFixture() {

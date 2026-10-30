@@ -4,6 +4,7 @@ use hablog::logger::{escaped, ConsoleLogger};
 use hablog::model::Direction;
 use hablog::origins::crypto::{self, OriginsSession, StreamKind};
 use hablog::origins::discovery::{self, DiscoverySnapshot, ObservedEndpoint};
+use hablog::origins::fuse;
 use hablog::origins::observer::{
     self, LocateError, ObserverConfig, ObserverEvent, ObserverHandle, ObserverRuntime,
 };
@@ -546,12 +547,19 @@ impl TrafficLog {
                 }
                 // Metadata-only operations carry no bytes.
                 match op.plaintext_hex().map(hex::decode) {
-                    Some(Ok(plaintext)) => ConsoleLogger::log_decrypted(
-                        op.direction,
-                        &op.kind,
-                        &op.sequence,
-                        &plaintext,
-                    ),
+                    Some(Ok(plaintext)) => {
+                        // Logs get shared; the login password stays off the screen.
+                        let masked = (op.direction == Direction::ClientToServer
+                            && op.kind == "payload")
+                            .then(|| fuse::mask_login_password(&plaintext))
+                            .flatten();
+                        ConsoleLogger::log_decrypted(
+                            op.direction,
+                            &op.kind,
+                            &op.sequence,
+                            masked.as_deref().unwrap_or(&plaintext),
+                        )
+                    }
                     Some(Err(_)) => ConsoleLogger::warning(format!(
                         "The observer sent unreadable bytes for {} #{}",
                         op.operation, op.sequence

@@ -91,7 +91,9 @@ selected executable is an x86 PE, that the module is the selected installation's
 `Xtras/BobbaXtra.x32`, and that the complete module file matches that hash; any
 other build is refused without installing hooks. Inside the client, the agent
 checks the architecture, then compares the loaded module path and the four
-function prologs (with PE HIGHLOW relocation bytes masked for ASLR). Because the
+function prologs (with PE HIGHLOW relocation bytes masked for ASLR). The
+projector loads its Xtras through 8.3 short names (`HABBOL~1`), so the loaded
+path is expanded with `GetLongPathNameW` before it is compared. Because the
 file hash was already verified, a difference there is reported as
 `signature_mismatch_proceeding` and the verified RVAs are still hooked.
 
