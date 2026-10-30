@@ -9,3 +9,4 @@ pub mod origins {
 }
 pub mod proxy;
 pub mod settings;
+pub mod wsl;

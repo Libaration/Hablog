@@ -252,3 +252,36 @@ fn routes_a_copy_of_the_discovered_client_to_the_relay() {
     // Only the game endpoint is redirected; MUS still goes to the real host.
     assert!(patched.contains("connection.mus.host=game-test.invalid;"));
 }
+
+#[test]
+fn installation_paths_recorded_by_the_launcher_are_translated() {
+    // What WSL sees: versions.json holds Windows paths.
+    let fixture = Fixture::new();
+    let client = fixture.client("368", "Habbo.exe", "test-english.invalid");
+    let root = client.parent().unwrap().to_path_buf();
+    fixture.versions(
+        "368",
+        json!([{ "client": "shockwave", "version": "368", "path": "C:\\Habbo\\368" }]),
+    );
+    let translated = hablog::origins::discovery::discover_from_roots_with(
+        Some(&fixture.roaming),
+        Some(&fixture.local),
+        &|path| {
+            if path == Path::new("C:\\Habbo\\368") {
+                root.clone()
+            } else {
+                path.to_path_buf()
+            }
+        },
+    );
+    assert!(translated.warnings.is_empty(), "{:?}", translated.warnings);
+    assert!(translated.installations[0].registered);
+    // Untranslated, the same store points nowhere and only the download
+    // folder fallback finds the client.
+    let untranslated = discover_from_roots(Some(&fixture.roaming), Some(&fixture.local));
+    assert!(!untranslated.installations[0].registered);
+    assert!(untranslated
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("missing")));
+}

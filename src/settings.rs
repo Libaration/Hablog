@@ -38,8 +38,9 @@ captures_folder = "logs"
 # Connect to this game server instead of the one built into the client.
 #upstream = "game-ous.habbo.com:40001"
 
-# Look for the Habbo Launcher in other AppData folders, for example inside a
-# Wine prefix. Single quotes keep backslashes as they are.
+# Look for the Habbo Launcher in other AppData folders. Hablog finds them
+# itself on Windows and under WSL; this is for setups like a Wine prefix.
+# Single quotes keep backslashes as they are.
 #appdata = 'C:\Users\you\AppData\Roaming'
 #local_appdata = 'C:\Users\you\AppData\Local'
 

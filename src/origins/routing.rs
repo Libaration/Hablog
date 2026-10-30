@@ -89,15 +89,21 @@ impl RoutePlan {
         }
         // An unchanged copy is left alone, so one that is still running
         // (and therefore locked on Windows) doesn't block a restart.
-        if fs::read(&self.routed_exe).is_ok_and(|existing| existing == bytes) {
-            return Ok(self.routed_exe.clone());
+        if !fs::read(&self.routed_exe).is_ok_and(|existing| existing == bytes) {
+            fs::write(&self.routed_exe, &bytes).map_err(|e| {
+                format!(
+                    "Cannot write {} (is it still running?): {e}",
+                    self.routed_exe.display()
+                )
+            })?;
         }
-        fs::write(&self.routed_exe, &bytes).map_err(|e| {
-            format!(
-                "Cannot write {} (is it still running?): {e}",
-                self.routed_exe.display()
-            )
-        })?;
+        // Under WSL, a Windows drive mounted with metadata gives new files no
+        // execute permission, and WSL then refuses to start the copy.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.routed_exe, fs::Permissions::from_mode(0o755));
+        }
         Ok(self.routed_exe.clone())
     }
 }

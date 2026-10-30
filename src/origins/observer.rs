@@ -8,6 +8,7 @@
 //! files or transmits anything over a network.
 
 use crate::model::Direction;
+use crate::wsl;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -112,7 +113,8 @@ impl fmt::Display for LocateError {
 impl ObserverRuntime {
     /// Uses `dir` if given, otherwise `observer/` next to the executable or
     /// `automation/` in the working directory. A `node.exe` in that folder
-    /// is preferred over `node` on PATH.
+    /// is preferred over `node` on PATH; under WSL that is Windows' `node.exe`,
+    /// since Frida has to run on the Windows side with the game.
     pub fn locate(dir: Option<&Path>) -> Result<Self, LocateError> {
         let candidates: Vec<PathBuf> = match dir {
             Some(dir) => vec![dir.to_path_buf()],
@@ -144,6 +146,8 @@ impl ObserverRuntime {
         let bundled = dir.join("node.exe");
         let node_exe = if bundled.is_file() {
             bundled
+        } else if wsl::detected() {
+            PathBuf::from("node.exe")
         } else {
             PathBuf::from("node")
         };
@@ -156,7 +160,12 @@ impl ObserverRuntime {
             }
             None => {
                 return Err(LocateError::NoNode(format!(
-                    "The observer needs Node.js {MIN_NODE_MAJOR} or later, which was not found."
+                    "The observer needs Node.js {MIN_NODE_MAJOR} or later{}, which was not found.",
+                    if wsl::detected() {
+                        " installed on Windows"
+                    } else {
+                        ""
+                    }
                 )))
             }
         }
@@ -190,10 +199,25 @@ fn node_major(node: &Path) -> Option<u32> {
 /// Installs the companion's pinned dependencies with `npm ci`, showing npm's
 /// own output.
 pub async fn install(dir: &Path) -> Result<(), String> {
-    // npm is a .cmd script on Windows, which needs its full name.
-    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
-    let status = Command::new(npm)
-        .arg("ci")
+    let mut command = if wsl::detected() {
+        // Windows' npm, so Frida's Windows binaries are installed. cmd.exe
+        // can only work in a folder on a Windows drive.
+        if !wsl::on_windows_drive(dir) {
+            return Err(format!(
+                "From WSL, the observer can only be installed when the project is on a Windows drive (such as /mnt/c), not in {}.",
+                dir.display()
+            ));
+        }
+        let mut command = Command::new("cmd.exe");
+        command.args(["/d", "/c", "npm", "ci"]);
+        command
+    } else {
+        // npm is a .cmd script on Windows, which needs its full name.
+        let mut command = Command::new(if cfg!(windows) { "npm.cmd" } else { "npm" });
+        command.arg("ci");
+        command
+    };
+    let status = command
         .current_dir(dir)
         .status()
         .await
@@ -215,9 +239,23 @@ impl ObserverHandle {
     pub async fn start(
         config: ObserverConfig,
     ) -> Result<(Self, mpsc::Receiver<ObserverEvent>), String> {
+        let (host_script, client_exe, module_path) = if wsl::detected() {
+            // Windows' Node needs Windows paths.
+            let windows = |path: &Path| {
+                wsl::to_windows(path)
+                    .ok_or_else(|| format!("Cannot convert {} to a Windows path.", path.display()))
+            };
+            (
+                windows(&config.host_script)?,
+                windows(&config.client_exe)?,
+                windows(&config.module_path)?,
+            )
+        } else {
+            (config.host_script, config.client_exe, config.module_path)
+        };
         let mut command = Command::new(&config.node_exe);
         command
-            .arg(&config.host_script)
+            .arg(&host_script)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -233,8 +271,8 @@ impl ObserverHandle {
         let start = serde_json::json!({
             "command": "start",
             "config": {
-                "clientExecutablePath": config.client_exe.to_string_lossy(),
-                "modulePath": config.module_path.to_string_lossy(),
+                "clientExecutablePath": client_exe.to_string_lossy(),
+                "modulePath": module_path.to_string_lossy(),
                 "captureMode": "full",
                 "launch": config.launch,
                 "argv": config.argv,

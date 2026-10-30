@@ -4,6 +4,7 @@
 //! not a built-in server list. This module neither launches nor modifies clients
 //! and never reads command lines, launcher logs, browser data or login tokens.
 
+use crate::wsl;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
@@ -155,11 +156,35 @@ pub fn discover() -> DiscoverySnapshot {
 }
 
 /// Discovery with optional replacements for APPDATA and LOCALAPPDATA, for
-/// example the matching folders inside a Wine prefix.
+/// example the matching folders inside a Wine prefix. Under WSL, Windows'
+/// own folders are found through interop.
 pub fn discover_with(roaming: Option<PathBuf>, local: Option<PathBuf>) -> DiscoverySnapshot {
-    let roaming = roaming.or_else(|| std::env::var_os("APPDATA").map(PathBuf::from));
-    let local = local.or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from));
-    let mut result = discover_from_roots(roaming.as_deref(), local.as_deref());
+    let wsl = wsl::detected();
+    let roaming = roaming
+        .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
+        .or_else(|| {
+            wsl.then(|| wsl::windows_folder("APPDATA", "AppData/Roaming", "Habbo Launcher"))
+                .flatten()
+        });
+    let local = local
+        .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
+        .or_else(|| {
+            wsl.then(|| {
+                wsl::windows_folder(
+                    "LOCALAPPDATA",
+                    "AppData/Local",
+                    "Programs/habbo-electron-launcher",
+                )
+            })
+            .flatten()
+        });
+    // The launcher records installations as Windows paths.
+    let translate = |path: &Path| {
+        wsl.then(|| wsl::from_windows(path))
+            .flatten()
+            .unwrap_or_else(|| path.to_path_buf())
+    };
+    let mut result = discover_from_roots_with(roaming.as_deref(), local.as_deref(), &translate);
     match platform::running_clients(&result.installations) {
         Ok(clients) => result.running_clients = clients,
         Err(error) => result.warnings.push(error),
@@ -169,6 +194,16 @@ pub fn discover_with(roaming: Option<PathBuf>, local: Option<PathBuf>) -> Discov
 
 /// Explicit roots support isolated fixtures; normal callers should use discover.
 pub fn discover_from_roots(roaming: Option<&Path>, local: Option<&Path>) -> DiscoverySnapshot {
+    discover_from_roots_with(roaming, local, &|path| path.to_path_buf())
+}
+
+/// Like `discover_from_roots`, with `translate` applied to the installation
+/// paths recorded by the launcher.
+pub fn discover_from_roots_with(
+    roaming: Option<&Path>,
+    local: Option<&Path>,
+    translate: &dyn Fn(&Path) -> PathBuf,
+) -> DiscoverySnapshot {
     let mut snapshot = DiscoverySnapshot::default();
     if let Some(local) = local {
         let root = local.join("Programs/habbo-electron-launcher");
@@ -210,11 +245,12 @@ pub fn discover_from_roots(roaming: Option<&Path>, local: Option<&Path>) -> Disc
                     .into_iter()
                     .filter(|i| i.client == "shockwave")
                 {
-                    if installation.path.is_dir() {
+                    let path = translate(&installation.path);
+                    if path.is_dir() {
                         add_installation(
                             &mut snapshot,
                             installation.version,
-                            installation.path,
+                            path,
                             true,
                             installation.last_modified,
                         );
@@ -497,8 +533,31 @@ fn read_asar_entry(path: &Path, entry_path: &str) -> Result<Vec<u8>, String> {
 #[cfg(not(windows))]
 mod platform {
     use super::*;
-    pub fn running_clients(_: &[ClientInstallation]) -> Result<Vec<RunningClient>, String> {
-        Ok(Vec::new())
+    /// Under WSL, Windows' own process list; it has names and PIDs but no
+    /// paths, which is enough to notice an open client.
+    pub fn running_clients(
+        installations: &[ClientInstallation],
+    ) -> Result<Vec<RunningClient>, String> {
+        if !wsl::detected() {
+            return Ok(Vec::new());
+        }
+        Ok(wsl::windows_processes()?
+            .into_iter()
+            .filter_map(|(pid, name)| {
+                let server_code = if name.eq_ignore_ascii_case("Habbo.exe") {
+                    installations
+                        .first()
+                        .and_then(|installation| installation.current_default_server_code.clone())
+                } else {
+                    Some(regional_identity(Path::new(&name))?.0)
+                };
+                Some(RunningClient {
+                    pid,
+                    path: PathBuf::from(name),
+                    server_code,
+                })
+            })
+            .collect())
     }
 }
 

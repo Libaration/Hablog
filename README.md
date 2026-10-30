@@ -16,7 +16,12 @@ That's it. Hablog:
 4. Prints the traffic and saves each session to `logs/`.
 5. Stops when you close the game, or when you press Ctrl+C.
 
-Close Origins first if it's already open; that copy is connected directly. Origins is a Windows game, so on macOS and Linux Hablog prepares everything and tells you which file to start.
+Close Origins first if it's already open; that copy is connected directly.
+
+### WSL
+Under WSL, Hablog runs as a Linux program but still does all of the above. Through WSL's interop it finds Windows' AppData folder, starts the Windows game, and runs the observer with Windows' Node.js. The game reaches the relay through WSL's localhost forwarding, which is on by default. For decrypted traffic, keep the project on a Windows drive (such as `/mnt/c/...`) and install Node.js on Windows. Running Hablog directly on Windows (`cargo run` in PowerShell) works too.
+
+On macOS and other Linux systems Hablog prepares everything and tells you which file to start on Windows.
 
 ## Settings
 The first run creates `hablog.toml` next to where you run Hablog, with every setting explained. The defaults are the automatic behavior above, so you only need it to change something:
@@ -85,6 +90,7 @@ A row is a TCP read, not necessarily one complete message.
 * `capture.rs`: Writes the JSONL capture files.
 * `logger.rs`: Console output.
 * `model.rs`: Traffic direction and capture records.
+* `wsl.rs`: Finding Windows folders, converting paths and starting Windows programs from WSL.
 * `origins/discovery.rs`: Finds the launcher, installed versions, each hotel's client and the servers built into it, and running clients.
 * `origins/routing.rs`: Writes the routed copy of the client.
 * `origins/observer.rs`: Runs the observer in `automation/` and reads its events.

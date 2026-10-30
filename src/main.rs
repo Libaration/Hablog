@@ -10,6 +10,7 @@ use hablog::origins::observer::{
 use hablog::origins::routing::RoutePlan;
 use hablog::proxy::{ProxyConfig, ProxyEvent, ProxyHandle};
 use hablog::settings::{self, Settings, Source};
+use hablog::wsl;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use tokio::process::Child;
@@ -85,9 +86,15 @@ async fn run() {
                 ConsoleLogger::warning(warning);
             }
             ConsoleLogger::error(e);
-            ConsoleLogger::info(
-                "Install Origins with the Habbo Launcher and open it once, then run Hablog again.",
-            );
+            ConsoleLogger::info(if snapshot.profile_root.is_some() {
+                "Open Origins once through the Habbo Launcher so it's installed, then run Hablog again."
+            } else if wsl::detected() {
+                "Hablog couldn't find Windows' AppData folder from WSL. Set appdata and local_appdata under [advanced] in hablog.toml, for example '/mnt/c/Users/you/AppData/Roaming'."
+            } else if cfg!(windows) {
+                "Install Origins with the Habbo Launcher and open it once, then run Hablog again."
+            } else {
+                "Origins is a Windows game. Set appdata and local_appdata under [advanced] in hablog.toml to a Windows AppData folder, for example inside a Wine prefix."
+            });
             std::process::exit(1);
         }
     };
@@ -132,10 +139,7 @@ async fn run() {
     let game = if settings.launch {
         start_game(&settings, &plan, &routed).await
     } else {
-        ConsoleLogger::info(format!(
-            "Start {} to play through Hablog.",
-            routed.display()
-        ));
+        ConsoleLogger::info(format!("Start {} to play through Hablog.", shown(&routed)));
         Game::Manual
     };
     let log = TrafficLog::new(settings, plan.upstream);
@@ -224,13 +228,15 @@ async fn start_game(settings: &Settings, plan: &RoutePlan, routed: &Path) -> Gam
 }
 
 fn launch_direct(routed: &Path) -> Game {
-    if !cfg!(windows) {
+    if !wsl::runs_windows_programs() {
         ConsoleLogger::info(format!(
             "Origins runs on Windows: start {} there to play through Hablog.",
             routed.display()
         ));
         return Game::Manual;
     }
+    // Under WSL, interop runs the Windows program and this child stands in
+    // for it until it exits.
     let mut command = tokio::process::Command::new(routed);
     if let Some(parent) = routed.parent() {
         command.current_dir(parent);
@@ -241,18 +247,28 @@ fn launch_direct(routed: &Path) -> Game {
             Game::Direct(child)
         }
         Err(e) => {
-            ConsoleLogger::error(format!("Cannot start {}: {e}", routed.display()));
+            ConsoleLogger::error(format!("Cannot start {}: {e}", shown(routed)));
             ConsoleLogger::info("Start it yourself to play through Hablog.");
             Game::Manual
         }
     }
 }
 
+/// A path as the user would type it into Windows: under WSL, the Windows form.
+fn shown(path: &Path) -> String {
+    wsl::detected()
+        .then(|| wsl::to_windows(path))
+        .flatten()
+        .unwrap_or_else(|| path.to_path_buf())
+        .display()
+        .to_string()
+}
+
 /// Finds the observer, offering to install its dependencies the first time.
 async fn observer_runtime(dir: Option<&Path>) -> Option<ObserverRuntime> {
     match ObserverRuntime::locate(dir) {
         Ok(runtime) => Some(runtime),
-        Err(_) if !cfg!(windows) => {
+        Err(_) if !wsl::runs_windows_programs() => {
             ConsoleLogger::info("Decrypted traffic is only available on Windows.");
             None
         }
