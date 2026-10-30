@@ -98,7 +98,7 @@ DARAHHIIKHJHPAIQAdd-MM-yyyy[2][1]
 hex: 44415241484849494b484a48504149514164642d4d4d2d797979790201
 ```
 
-The header is written as in the log (`DA`) or as its ID (`257`). Values are `i:` numbers, `b:` true/false, `s:` strings and `r:` raw text, with `[n]` for any byte. Messages are built as the server sends them to the game (strings end with `[2]`, the message with `[1]`); start with `out` for a message the game sends, where strings carry their length instead. Hablog can't send messages yet.
+The header is written as in the log (`DA`) or as its ID (`257`). Values are `i:` numbers, `b:` true/false, `s:` strings and `r:` raw text, with `[n]` for any byte. Messages are built as the server sends them to the game (strings end with `[2]`, the message with `[1]`); start with `out` for a message the game sends, where strings carry their length instead. Hablog can't send messages yet; see [docs/tasks/sending-messages.md](docs/tasks/sending-messages.md).
 
 ```bash
 cargo run --release -- decrypt
